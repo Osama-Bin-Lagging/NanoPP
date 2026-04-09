@@ -1,0 +1,398 @@
+{
+  "machine": {
+    "serial_port": "/dev/tty.usbserial-130",
+    "baud_rate": 250000,
+    "axis_limits": {
+      "x": {
+        "min": 0,
+        "max": 130
+      },
+      "y": {
+        "min": 0,
+        "max": 170
+      }
+    },
+    "travel_feedrate": 1000,
+    "z_feedrate": 500,
+    "disable_software_endstops": true
+  },
+  "z_heights": {
+    "safe": 0,
+    "board_surface": 16,
+    "feeder_pick": 23,
+    "discard": 23
+  },
+  "camera": {
+    "device_index": 1,
+    "position": {
+      "x": 10.5,
+      "y": 32.7
+    },
+    "units_per_pixel": {
+      "x": 0.01842105,
+      "y": 0.01133721
+    },
+    "settle_time_ms": 250
+  },
+  "vacuum": {
+    "on_cmd": "M42 P4 S0",
+    "off_cmd": "M42 P4 S255",
+    "pick_dwell_ms": 1000,
+    "place_dwell_ms": 1000
+  },
+  "paste_dispensing": {
+    "travel_feedrate": 3000,
+    "dispense_feedrate": 300,
+    "extrude_per_mm": 0.05,
+    "dispense_z": 0,
+    "safe_z": -5
+  },
+  "board": {
+    "origin": {
+      "x": 0,
+      "y": 0
+    },
+    "place_z": 16
+  },
+  "vision": {
+    "max_passes": 3,
+    "max_linear_offset_mm": 1.0,
+    "max_angular_offset_deg": 10,
+    "converge_mm": 0.05,
+    "converge_deg": 0.5,
+    "hsv": {
+      "hue_min": 60,
+      "hue_max": 130,
+      "sat_min": 32,
+      "sat_max": 255,
+      "val_min": 64,
+      "val_max": 255
+    },
+    "threshold": 100,
+    "blur_kernel": 9,
+    "min_contour_area": 0.01,
+    "mask_diameter": 525
+  },
+  "parts": {
+    "IC_SOIC8": {
+      "height": 1.75,
+      "body": {
+        "width": 3.9,
+        "length": 4.9
+      },
+      "pads": [
+        {
+          "id": 1,
+          "x": -2.7,
+          "y": 1.905,
+          "width": 0.6,
+          "height": 1.55
+        },
+        {
+          "id": 2,
+          "x": -2.7,
+          "y": 0.635,
+          "width": 0.6,
+          "height": 1.55
+        },
+        {
+          "id": 3,
+          "x": -2.7,
+          "y": -0.635,
+          "width": 0.6,
+          "height": 1.55
+        },
+        {
+          "id": 4,
+          "x": -2.7,
+          "y": -1.905,
+          "width": 0.6,
+          "height": 1.55
+        },
+        {
+          "id": 5,
+          "x": 2.7,
+          "y": -1.905,
+          "width": 0.6,
+          "height": 1.55
+        },
+        {
+          "id": 6,
+          "x": 2.7,
+          "y": -0.635,
+          "width": 0.6,
+          "height": 1.55
+        },
+        {
+          "id": 7,
+          "x": 2.7,
+          "y": 0.635,
+          "width": 0.6,
+          "height": 1.55
+        },
+        {
+          "id": 8,
+          "x": 2.7,
+          "y": 1.905,
+          "width": 0.6,
+          "height": 1.55
+        }
+      ]
+    },
+    "IC_SOT236": {
+      "height": 1.1,
+      "body": {
+        "width": 1.6,
+        "length": 2.9
+      },
+      "pads": [
+        {
+          "id": 1,
+          "x": -1.15,
+          "y": 0.95,
+          "width": 0.55,
+          "height": 0.7
+        },
+        {
+          "id": 2,
+          "x": -1.15,
+          "y": 0.0,
+          "width": 0.55,
+          "height": 0.7
+        },
+        {
+          "id": 3,
+          "x": -1.15,
+          "y": -0.95,
+          "width": 0.55,
+          "height": 0.7
+        },
+        {
+          "id": 4,
+          "x": 1.15,
+          "y": -0.95,
+          "width": 0.55,
+          "height": 0.7
+        },
+        {
+          "id": 5,
+          "x": 1.15,
+          "y": 0.0,
+          "width": 0.55,
+          "height": 0.7
+        },
+        {
+          "id": 6,
+          "x": 1.15,
+          "y": 0.95,
+          "width": 0.55,
+          "height": 0.7
+        }
+      ]
+    },
+    "IC_LQFN16": {
+      "height": 0.8,
+      "body": {
+        "width": 3.0,
+        "length": 3.0
+      },
+      "pads": [
+        {
+          "id": 1,
+          "x": -0.75,
+          "y": -1.525,
+          "width": 0.25,
+          "height": 0.65
+        },
+        {
+          "id": 2,
+          "x": -0.25,
+          "y": -1.525,
+          "width": 0.25,
+          "height": 0.65
+        },
+        {
+          "id": 3,
+          "x": 0.25,
+          "y": -1.525,
+          "width": 0.25,
+          "height": 0.65
+        },
+        {
+          "id": 4,
+          "x": 0.75,
+          "y": -1.525,
+          "width": 0.25,
+          "height": 0.65
+        },
+        {
+          "id": 5,
+          "x": 1.525,
+          "y": -0.75,
+          "width": 0.65,
+          "height": 0.25
+        },
+        {
+          "id": 6,
+          "x": 1.525,
+          "y": -0.25,
+          "width": 0.65,
+          "height": 0.25
+        },
+        {
+          "id": 7,
+          "x": 1.525,
+          "y": 0.25,
+          "width": 0.65,
+          "height": 0.25
+        },
+        {
+          "id": 8,
+          "x": 1.525,
+          "y": 0.75,
+          "width": 0.65,
+          "height": 0.25
+        },
+        {
+          "id": 9,
+          "x": 0.75,
+          "y": 1.525,
+          "width": 0.25,
+          "height": 0.65
+        },
+        {
+          "id": 10,
+          "x": 0.25,
+          "y": 1.525,
+          "width": 0.25,
+          "height": 0.65
+        },
+        {
+          "id": 11,
+          "x": -0.25,
+          "y": 1.525,
+          "width": 0.25,
+          "height": 0.65
+        },
+        {
+          "id": 12,
+          "x": -0.75,
+          "y": 1.525,
+          "width": 0.25,
+          "height": 0.65
+        },
+        {
+          "id": 13,
+          "x": -1.525,
+          "y": 0.75,
+          "width": 0.65,
+          "height": 0.25
+        },
+        {
+          "id": 14,
+          "x": -1.525,
+          "y": 0.25,
+          "width": 0.65,
+          "height": 0.25
+        },
+        {
+          "id": 15,
+          "x": -1.525,
+          "y": -0.25,
+          "width": 0.65,
+          "height": 0.25
+        },
+        {
+          "id": 16,
+          "x": -1.525,
+          "y": -0.75,
+          "width": 0.65,
+          "height": 0.25
+        },
+        {
+          "id": "EP",
+          "x": 0.0,
+          "y": 0.0,
+          "width": 1.7,
+          "height": 1.7
+        }
+      ]
+    }
+  },
+  "feeders": {
+    "F1": {
+      "id": "soic8",
+      "part_id": "IC_SOIC8",
+      "enabled": true,
+      "ref_hole": {
+        "x": 15.0,
+        "y": 79.0,
+        "z": 23.0
+      },
+      "last_hole": {
+        "x": 18.7,
+        "y": 83.5,
+        "z": 23.0
+      },
+      "pitch": 8.0,
+      "tape_width": 12.0,
+      "rotation": 0.0,
+      "feed_count": 0,
+      "max_count": 5000
+    },
+    "F3": {
+      "id": "sot236",
+      "part_id": "IC_SOT236",
+      "enabled": false,
+      "ref_hole": {
+        "x": 3.5,
+        "y": 74.3,
+        "z": 16
+      },
+      "last_hole": {
+        "x": 3.5,
+        "y": 78.3,
+        "z": 0
+      },
+      "pitch": 4,
+      "tape_width": 8,
+      "rotation": -90,
+      "feed_count": 0,
+      "max_count": 0
+    }
+  },
+  "placements": [
+    {
+      "ref": "IC1",
+      "part_id": "IC_SOIC8",
+      "x": 73.0,
+      "y": 17.0,
+      "rotation": 0.0,
+      "enabled": true
+    },
+    {
+      "ref": "IC2",
+      "part_id": "IC_SOIC8",
+      "x": 211.06,
+      "y": 28.62,
+      "rotation": 0,
+      "enabled": false
+    },
+    {
+      "ref": "IC3",
+      "part_id": "IC_SOIC8",
+      "x": 183.12,
+      "y": 28.62,
+      "rotation": 0,
+      "enabled": false
+    },
+    {
+      "ref": "IC4",
+      "part_id": "IC_SOIC8",
+      "x": 157.72,
+      "y": 28.62,
+      "rotation": 0,
+      "enabled": false
+    }
+  ]
+}
