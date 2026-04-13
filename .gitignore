@@ -5,5 +5,7 @@ venv/
 output/
 capture_*.png
 calibration_debug.png
+.last_connection.json
+vision_results/
 *.egg-info/
 .DS_Store

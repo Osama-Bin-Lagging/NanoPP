@@ -56,6 +56,56 @@ class Component:
     pads: list[PadInfo] = field(default_factory=list)
 
 
+@dataclass(slots=True)
+class BoardCorner:
+    """Axis-aligned board bounding box in raw Gerber coordinates (mm).
+
+    KiCad Gerber uses Y-down (pad Y values are negative). These fields
+    store `abs(y)` for readability, so bigger `max_y_abs` means "further
+    toward the bottom of the drawing" = further south on the board.
+
+    The physical bottom-left corner of the PCB in raw (signed) Gerber
+    space is `(min_x, -max_y_abs)`.
+    """
+    min_x: float
+    max_x: float
+    min_y_abs: float
+    max_y_abs: float
+
+    @property
+    def width(self) -> float:
+        return round(self.max_x - self.min_x, 3)
+
+    @property
+    def height(self) -> float:
+        return round(self.max_y_abs - self.min_y_abs, 3)
+
+    def shift_for_machine(self, origin_x: float, origin_y: float) -> tuple[float, float]:
+        """Compute (shift_x, shift_y) so that a raw Gerber pad coordinate
+        lands at `origin_xy` when the pad is at the bottom-left corner.
+
+        Applied as:  machine_x = gerber_x + shift_x
+                     machine_y = gerber_y + shift_y    (gerber_y is negative)
+
+        Derivation:
+            machine_x = (gerber_x - min_x)      + origin_x
+                      = gerber_x + (-min_x + origin_x)
+            machine_y = (max_y_abs - |gerber_y|) + origin_y
+                      = (max_y_abs + gerber_y) + origin_y   [since gerber_y<0]
+                      = gerber_y + (max_y_abs + origin_y)
+        """
+        return (-self.min_x + origin_x, self.max_y_abs + origin_y)
+
+    def as_bounds_dict(self) -> dict:
+        """Legacy dict form for the private helpers that still use it."""
+        return {
+            "min_x": self.min_x,
+            "max_x": self.max_x,
+            "min_y_abs": self.min_y_abs,
+            "max_y_abs": self.max_y_abs,
+        }
+
+
 # ── Private helpers: coordinate math ────────────────────────────
 # Adapted from ~/Desktop/EDL/gerber_parser.py
 
@@ -88,6 +138,22 @@ def _get_board_bounds(edge_cuts_path: Path) -> dict:
         "min_y_abs": min(ys),
         "max_y_abs": max(ys),
     }
+
+
+def parse_edge_cuts(path: str | Path) -> BoardCorner:
+    """Parse an Edge_Cuts.gbr profile layer into a bounding rectangle.
+
+    Public wrapper around `_get_board_bounds` that returns the typed
+    dataclass. Used by `paste_dispenser.dispense_paste()` to anchor pad
+    coordinates to the physical board corner.
+    """
+    bounds = _get_board_bounds(Path(path))
+    return BoardCorner(
+        min_x=bounds["min_x"],
+        max_x=bounds["max_x"],
+        min_y_abs=bounds["min_y_abs"],
+        max_y_abs=bounds["max_y_abs"],
+    )
 
 
 def _gerber_to_bl(x: float, y_abs: float, bounds: dict) -> tuple[float, float]:
@@ -533,3 +599,185 @@ def load_board(
     if origin_x != 0.0 or origin_y != 0.0:
         components = transform_to_machine(components, origin_x, origin_y)
     return components, board_info
+
+
+def load_placements_from_pos(
+    pos_path: str | Path,
+    origin_xy: tuple[float, float],
+    edge_cuts_path: str | Path | None = None,
+    paste_path: str | Path | None = None,
+    package_map: dict[str, str] | None = None,
+    skip_refs_prefixes: list[str] | None = None,
+) -> list["Placement"]:
+    """Parse a .pos file into `Placement` objects in machine coordinates.
+
+    Two modes, picked automatically by which optional files are supplied:
+
+    1. **Full auto-detect** (pos + edge_cuts + paste):
+       Uses `_detect_pos_origin` to cross-reference F_Paste pad centroids
+       with .pos component positions, deriving the KiCad page-origin
+       offset. Produces bottom-left-relative coords, then adds `origin_xy`.
+
+    2. **Bottom-left convention** (pos only, or missing any of the other
+       two files): Trusts that the .pos coordinates are already
+       board-relative (KiCad drill/place origin was set to the PCB
+       corner). Adds `origin_xy` directly.
+
+    Only top-side placements are returned by default, with rotation and
+    part_id derived from the `Package` column of the .pos file.
+
+    Raises `BoardParserError` if `pos_path` is unreadable or empty.
+    """
+    from nanopnp.config import Placement  # local to avoid circular import
+
+    pos_path = Path(pos_path)
+    if not pos_path.exists():
+        raise BoardParserError(f".pos file not found: {pos_path}")
+
+    origin_x, origin_y = origin_xy
+
+    file_map: dict[str, Path] = {"pos_top": pos_path}
+    raw: list[dict]
+
+    have_both = edge_cuts_path is not None and paste_path is not None
+    if have_both:
+        # Mode 1: full auto-detect
+        ep = Path(edge_cuts_path)
+        pp = Path(paste_path)
+        if not ep.exists() or not pp.exists():
+            raise BoardParserError(
+                f"Missing auxiliary files: {ep.name}, {pp.name}"
+            )
+        file_map["Edge_Cuts"] = ep
+        file_map["F_Paste"] = pp
+        bounds = _get_board_bounds(ep)
+        pos_origin = _detect_pos_origin(file_map, bounds)
+        raw = _parse_pos_files(file_map, bounds, pos_origin)
+        log.info(
+            "[place] auto-detect origin: x_offset=%.3f y_sum=%.3f",
+            pos_origin["x_offset"], pos_origin["y_sum"],
+        )
+    else:
+        # Mode 2: trust bottom-left convention — skip the transform,
+        # read raw .pos coords and treat them as already board-relative.
+        raw = _parse_pos_raw(pos_path)
+        log.info(
+            "[place] .pos-only mode (no Edge_Cuts/F_Paste) — trusting "
+            "bottom-left convention"
+        )
+
+    if not raw:
+        raise BoardParserError(f"No placements parsed from {pos_path.name}")
+
+    pkg_map = package_map or {}
+    skip_prefixes = tuple(skip_refs_prefixes or [])
+
+    placements: list[Placement] = []
+    skipped_refs: list[str] = []
+    for p in raw:
+        if p.get("side", "top") != "top":
+            continue
+
+        ref = p["reference"]
+        # Skip fiducials, test points, mounting holes — anything the
+        # user's config flags as "not pickable".
+        if skip_prefixes and ref.startswith(skip_prefixes):
+            skipped_refs.append(ref)
+            continue
+
+        # Translate the KiCad package string to an abstract feeder
+        # part_id via substring match. First matching substring wins.
+        # No match → pass through the raw package name (the engine will
+        # then fail with a clear "No feeder for 'X'" which is the right
+        # signal to add a new mapping entry).
+        part_id = p["package"]
+        for pattern, abstract_id in pkg_map.items():
+            if pattern in part_id:
+                part_id = abstract_id
+                break
+
+        placements.append(Placement(
+            ref=ref,
+            part_id=part_id,
+            x=round(p["x"] + origin_x, 6),
+            y=round(p["y"] + origin_y, 6),
+            rotation=p["rotation"],
+            enabled=True,
+        ))
+
+    if skipped_refs:
+        log.info("[place] skipped %d non-pickable refs: %s",
+                 len(skipped_refs), ", ".join(skipped_refs[:8]) + ("..." if len(skipped_refs) > 8 else ""))
+    log.info("[place] loaded %d top-side placements from %s",
+             len(placements), pos_path.name)
+    return placements
+
+
+def _parse_pos_raw(pos_path: Path) -> list[dict]:
+    """Parse a .pos file without any coordinate transform.
+
+    Used by `load_placements_from_pos` when no Edge_Cuts/F_Paste are
+    available — the caller is responsible for adding any machine-space
+    offset.
+    """
+    rows: list[dict] = []
+    with open(pos_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) < 7:
+                continue
+            rows.append({
+                "reference": parts[0],
+                "value": parts[1],
+                "package": " ".join(parts[2:-4]),
+                "x": float(parts[-4]),
+                "y": float(parts[-3]),
+                "rotation": float(parts[-2]),
+                "side": parts[-1].lower(),
+            })
+    return rows
+
+
+def write_pos_file(path: str | Path, rows: list[dict]) -> None:
+    """Write a KiCad-compatible .pos file.
+
+    Each row is a dict with keys: reference, value, package, x, y, rotation, side.
+    The output preserves KiCad's ASCII header format so it round-trips
+    through `_parse_pos_raw`. Column alignment is simpler than KiCad's
+    original (single-space separated) — the parser tolerates either.
+
+    Only top-side rows are emitted by default if no side is given.
+    """
+    from datetime import datetime
+
+    path = Path(path)
+    sides = sorted({r.get("side", "top").lower() for r in rows})
+    side_line = "top" if sides == ["top"] else ("bottom" if sides == ["bottom"] else "top & bottom")
+
+    header = [
+        f"### Footprint positions - written by NanoPnP on {datetime.now().isoformat(timespec='seconds')} ###",
+        "### (round-trip compatible with KiCad .pos format)",
+        "## Unit = mm, Angle = deg.",
+        f"## Side : {side_line}",
+        "# Ref     Val       Package                                           PosX       PosY       Rot  Side",
+    ]
+
+    lines = list(header)
+    for r in rows:
+        ref = r["reference"]
+        val = r.get("value", "")
+        pkg = r.get("package", "")
+        x = float(r["x"])
+        y = float(r["y"])
+        rot = float(r.get("rotation", 0.0))
+        side = r.get("side", "top").lower()
+        lines.append(
+            f"{ref:<9} {val:<9} {pkg:<49} {x:9.4f}  {y:9.4f}  {rot:8.4f}  {side}"
+        )
+    lines.append("## End")
+
+    path.write_text("\n".join(lines) + "\n")
+    log.info("Wrote %d placements to %s", len(rows), path.name)

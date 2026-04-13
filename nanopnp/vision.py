@@ -108,6 +108,43 @@ class VisionSystem:
     def __exit__(self, *exc):
         self.close()
 
+    # ── Pattern matching ────────────────────────────────────
+
+    @staticmethod
+    def _match_pad_pattern(centroids: list, expected: int) -> list:
+        """Select the `expected` most densely-packed contours.
+
+        Works by computing, for each centroid, the sum of distances to its
+        `expected-1` nearest neighbors. Real pads in a tight cluster have
+        low sums; outliers (like background glare far from the IC) have
+        high sums. Keep the N lowest.
+
+        Returns a list of cv2 contours (not centroid tuples).
+        """
+        import numpy as np
+        if len(centroids) <= expected:
+            return [c[2] for c in centroids]
+
+        pts = np.array([(c[0], c[1]) for c in centroids])
+        n = len(pts)
+
+        # Pairwise distance matrix
+        dx = pts[:, 0:1] - pts[:, 0:1].T
+        dy = pts[:, 1:2] - pts[:, 1:2].T
+        dist_mat = np.sqrt(dx * dx + dy * dy)
+
+        # For each point, sum of distances to its (expected-1) nearest neighbors
+        density_score = np.zeros(n)
+        for i in range(n):
+            sorted_dists = np.sort(dist_mat[i])
+            # sorted_dists[0] is 0 (self), take next (expected-1)
+            k = min(expected - 1, n - 1)
+            density_score[i] = np.sum(sorted_dists[1:1 + k])
+
+        # Keep the `expected` points with lowest scores (most densely packed)
+        keep_idx = np.argsort(density_score)[:expected]
+        return [centroids[i][2] for i in sorted(keep_idx)]
+
     # ── Frame capture ───────────────────────────────────────
 
     def _ensure_open(self) -> cv2.VideoCapture:
@@ -165,112 +202,222 @@ class VisionSystem:
     ) -> VisionResult:
         """Run the OpenCV vision pipeline and return part offset from center.
 
-        Pipeline (from OpenPnP vision-settings.xml):
-            1. GaussianBlur(k=blur_kernel)
-            2. MaskCircle(d=mask_diameter) — crop to circular ROI
-            3. BGR → HSV_FULL → MaskHsv(hsv thresholds) → HSV → BGR → Gray
-            4. Threshold (binary)
-            5. FindContours → FilterContours(min_area)
-            6. MinAreaRect on all contour points → center, size, angle
-            7. Convert pixel offsets to mm via units_per_pixel
+        Pipeline (tuned from real captured SOIC8 images):
+            1. BGR → Gray
+            2. GaussianBlur (5x5) to reduce noise
+            3. Threshold on brightness (find bright metallic pads)
+            4. Morphological opening to clean specks
+            5. FindContours (external only)
+            6. Filter by area [min_area, max_area] — rejects noise and big glare blobs
+            7. MinAreaRect on all filtered contours → center, size, angle
+            8. Convert pixel offsets to mm via units_per_pixel
 
-        Per-part overrides (from OpenPnP):
-            IC_SOIC8: threshold=249, min_area=618.84px, partmask=600
-            IC_SOT236/IC_LQFN16: use stock defaults
+        The key insight: SOIC8 pads are essentially white metallic reflectors,
+        so a simple grayscale threshold works much better than HSV for our
+        lighting setup.
         """
         frame = self.capture(settle=True)
         h, w = frame.shape[:2]
         v = self._vision_config
         debug = frame.copy()
 
-        # Per-part overrides (from vision-settings.xml)
+        # Threshold value: use the configurable threshold from config
+        # Good values for shiny pads under mixed lighting: 180-220
         threshold = v.threshold
-        min_area_px = v.min_contour_area  # will be converted below
-        partmask_d = 100000
-        if part_id == "IC_SOIC8":
-            threshold = 249
-            min_area_px = 618.84
-            partmask_d = 600
-        else:
-            # Convert min_area from sq mm to sq pixels for stock pipeline
-            px_per_mm_x = 1.0 / self._cam_config.units_per_pixel.x
-            px_per_mm_y = 1.0 / self._cam_config.units_per_pixel.y
-            min_area_px = v.min_contour_area * px_per_mm_x * px_per_mm_y
 
-        # 1. GaussianBlur
+        # Per-part area limits (in pixels). Tuned from real captured images.
+        # SOIC8 pads come out as blobs of ~4000-5500 px under typical lighting.
+        if part_id == "IC_SOIC8":
+            min_area_px = 500   # reject noise specks (areas ~100-300)
+            max_area_px = 6000
+        elif part_id == "IC_SOT236":
+            min_area_px = 200
+            max_area_px = 3000
+        elif part_id == "IC_LQFN16":
+            min_area_px = 150
+            max_area_px = 2500
+        else:
+            min_area_px = 80
+            max_area_px = 5000
+
+        # 1-2. Gray + Blur
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         k = v.blur_kernel
         if k % 2 == 0:
             k += 1
-        blurred = cv2.GaussianBlur(frame, (k, k), 0)
+        blurred = cv2.GaussianBlur(gray, (k, k), 0)
 
-        # 2. MaskCircle (general + partmask)
-        center = (w // 2, h // 2)
-        mask = np.zeros((h, w), dtype=np.uint8)
-        cv2.circle(mask, center, v.mask_diameter // 2, 255, -1)
-        masked = cv2.bitwise_and(blurred, blurred, mask=mask)
+        # 3. Threshold — isolate bright regions (pads)
+        _, binary = cv2.threshold(blurred, threshold, 255, cv2.THRESH_BINARY)
 
-        if partmask_d < 100000:
-            partmask = np.zeros((h, w), dtype=np.uint8)
-            cv2.circle(partmask, center, partmask_d // 2, 255, -1)
-            masked = cv2.bitwise_and(masked, masked, mask=partmask)
+        # 4. Morphological opening to remove noise specks
+        kernel = np.ones((3, 3), np.uint8)
+        cleaned = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
 
-        # 3. BGR → HSV_FULL → MaskHsv
-        hsv = cv2.cvtColor(masked, cv2.COLOR_BGR2HSV_FULL)
-        hsv_params = v.hsv
-        lower = np.array([hsv_params.hue_min, hsv_params.sat_min, hsv_params.val_min])
-        upper = np.array([hsv_params.hue_max, hsv_params.sat_max, hsv_params.val_max])
-        hsv_mask = cv2.inRange(hsv, lower, upper)
+        # 5. FindContours (external) — much faster and avoids hierarchy issues
+        contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        # HSV → BGR → Gray (following OpenPnP's stock pipeline)
-        hsv_applied = cv2.bitwise_and(masked, masked, mask=hsv_mask)
-        gray = cv2.cvtColor(hsv_applied, cv2.COLOR_BGR2GRAY)
-
-        # 4. Threshold
-        _, binary = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
-
-        # 5. FindContours → FilterContours
-        contours, _ = cv2.findContours(binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
-        filtered = [c for c in contours if cv2.contourArea(c) >= min_area_px]
+        # 6. Filter by area (both min and max)
+        filtered = [
+            c for c in contours
+            if min_area_px <= cv2.contourArea(c) <= max_area_px
+        ]
 
         if not filtered:
-            log.warning("detect_part: no contours after filtering (threshold=%d, min_area=%.1f)",
-                        threshold, min_area_px)
+            log.warning("detect_part [%s]: no contours after filtering (threshold=%d, area=%d-%d)",
+                        part_id or "stock", threshold, min_area_px, max_area_px)
             return VisionResult(dx_mm=0, dy_mm=0, drot_deg=0, confidence=0, frame=debug)
+
+        # Reject if too few contours (need at least 4 pads for a meaningful rect)
+        if len(filtered) < 4:
+            log.warning("detect_part [%s]: only %d pads found, need ≥4",
+                        part_id or "stock", len(filtered))
+            return VisionResult(dx_mm=0, dy_mm=0, drot_deg=0, confidence=0, frame=debug)
+
+        # Compute centroids for all candidate contours
+        centroids = []
+        for c in filtered:
+            M = cv2.moments(c)
+            if M["m00"] > 0:
+                cx = M["m10"] / M["m00"]
+                cy = M["m01"] / M["m00"]
+                centroids.append((cx, cy, c))
+
+        if len(centroids) < 4:
+            log.warning("detect_part [%s]: too few valid centroids", part_id or "stock")
+            return VisionResult(dx_mm=0, dy_mm=0, drot_deg=0, confidence=0, frame=debug)
+
+        # Pattern-match: for SOIC8 we know there should be exactly 8 pads
+        # arranged as two parallel rows of 4. For SOT236: 2 rows of 3. For LQFN16:
+        # 4 rows of 4. Pick the subset that best matches the expected count+layout.
+        expected_count = {"IC_SOIC8": 8, "IC_SOT236": 6, "IC_LQFN16": 16}.get(part_id, 0)
+
+        if expected_count > 0 and len(centroids) > expected_count:
+            filtered = self._match_pad_pattern(centroids, expected_count)
+            log.info("detect_part [%s]: matched %d-pad pattern (from %d candidates)",
+                     part_id, expected_count, len(centroids))
+        elif expected_count > 0 and len(centroids) < expected_count:
+            log.warning("detect_part [%s]: found only %d candidates, expected %d",
+                        part_id, len(centroids), expected_count)
+            filtered = [c[2] for c in centroids]
+        else:
+            filtered = [c[2] for c in centroids]
+
+        # Post-match size validation: if the bbox is much bigger than the
+        # expected part body, iteratively drop the contour farthest from
+        # the cluster centroid until the bbox fits or we run out of contours.
+        # This catches cases where the density-matcher included a far-away
+        # bright spot that stretched the MinAreaRect.
+        if expected_width_mm > 0 and expected_height_mm > 0 and len(filtered) > 4:
+            expected_max = max(expected_width_mm, expected_height_mm) * 1.5  # 50% slack
+            upp = max(self._cam_config.units_per_pixel.x, self._cam_config.units_per_pixel.y)
+            expected_max_px = expected_max / upp
+
+            for _ in range(len(filtered) - 4):
+                all_points = np.vstack(filtered)
+                rect = cv2.minAreaRect(all_points)
+                rect_center_tmp, rect_size_tmp, _ = rect
+                if max(rect_size_tmp) <= expected_max_px:
+                    break  # bbox fits, stop dropping
+                # Drop the contour whose centroid is farthest from rect center
+                dists = []
+                for c in filtered:
+                    M = cv2.moments(c)
+                    if M["m00"] > 0:
+                        cx = M["m10"] / M["m00"]
+                        cy = M["m01"] / M["m00"]
+                        d = (cx - rect_center_tmp[0]) ** 2 + (cy - rect_center_tmp[1]) ** 2
+                        dists.append(d)
+                    else:
+                        dists.append(0)
+                worst_idx = int(np.argmax(dists))
+                filtered.pop(worst_idx)
 
         # 6. MinAreaRect on all filtered contour points combined
         all_points = np.vstack(filtered)
         rect = cv2.minAreaRect(all_points)
         rect_center, rect_size, rect_angle = rect
 
-        # Offset from image center (pixels)
-        offset_x_px = rect_center[0] - (w / 2)
-        offset_y_px = rect_center[1] - (h / 2)
+        # Image → machine coordinate mapping:
+        #   bottom of image (+img_y) → +machine_X
+        #   left of image   (-img_x) → +machine_Y
+        #   yaw is around -Z (looking from top, CCW is positive),
+        #     so machine_yaw = 90 - image_yaw (after normalization)
+        img_dx_px = rect_center[0] - (w / 2)  # +image X = right
+        img_dy_px = rect_center[1] - (h / 2)  # +image Y = down
 
-        # 7. Convert to mm
-        dx_mm = offset_x_px * self._cam_config.units_per_pixel.x
-        dy_mm = offset_y_px * self._cam_config.units_per_pixel.y
+        # Map to machine frame
+        machine_dx_px = img_dy_px    # down in image → +X machine
+        machine_dy_px = -img_dx_px   # right in image → -Y machine
 
-        # Normalize angle: MinAreaRect returns [-90, 0)
+        # Convert to mm
+        dx_mm = machine_dx_px * self._cam_config.units_per_pixel.x
+        dy_mm = machine_dy_px * self._cam_config.units_per_pixel.y
+
+        # Angle computation:
+        # Expected camera orientation: IC body's LONG axis VERTICAL
+        # (pins on left and right of the image). A correctly oriented
+        # part has its long axis at ±90° from horizontal.
+        #
+        # minAreaRect returns (width, height, angle) where angle is the
+        # rotation of the "width" side from horizontal, in [-90, 0).
+        # We first compute the long-axis angle (from horizontal), then
+        # subtract 90° to express it relative to vertical (the expected
+        # orientation).
         rw, rh = rect_size
-        angle = rect_angle
+        raw_angle = rect_angle
         if rw < rh:
-            angle += 90
-        while angle > 180:
-            angle -= 360
-        while angle < -180:
-            angle += 360
-        drot_deg = angle
+            long_axis_angle = raw_angle + 90
+        else:
+            long_axis_angle = raw_angle
+
+        # Express relative to vertical: subtract 90°.
+        # A perfectly vertical long axis (90° from horizontal) becomes 0°.
+        rel_angle = long_axis_angle - 90
+
+        # Wrap to smallest equivalent rotation in [-45, 45]
+        while rel_angle > 45:
+            rel_angle -= 90
+        while rel_angle < -45:
+            rel_angle += 90
+
+        drot_deg = rel_angle
 
         # Confidence: ratio of detected area to expected part area
         total_area = sum(cv2.contourArea(c) for c in filtered)
         confidence = min(1.0, total_area / max(1, min_area_px * 10))
 
-        # Draw debug overlay
+        # Draw debug overlay: bbox + center + image center + dimensions in mm
+        img_center = (w // 2, h // 2)
         box = cv2.boxPoints(rect)
         box = np.int32(box)
         cv2.drawContours(debug, [box], 0, (0, 255, 0), 2)
+        # Also draw the individual pad contours in yellow
+        cv2.drawContours(debug, filtered, -1, (0, 255, 255), 1)
         cv2.circle(debug, (int(rect_center[0]), int(rect_center[1])), 5, (0, 0, 255), -1)
-        cv2.circle(debug, center, 5, (255, 0, 0), -1)
+        cv2.circle(debug, img_center, 5, (255, 0, 0), -1)
+
+        # Compute physical dimensions of detected bbox
+        rw_mm = rect_size[0] * self._cam_config.units_per_pixel.x
+        rh_mm = rect_size[1] * self._cam_config.units_per_pixel.y
+
+        # Draw dimensions label near the bbox (smaller, for reference)
+        label_x = int(rect_center[0]) + 10
+        label_y = int(rect_center[1]) - 10
+        cv2.putText(debug, f"{rw_mm:.2f}x{rh_mm:.2f}mm", (label_x, label_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA)
+
+        # Draw dx/dy/dC prominently in the top-left corner (large font)
+        hud_x, hud_y = 20, 40
+        line_h = 40
+        cv2.rectangle(debug, (hud_x - 10, hud_y - 30), (hud_x + 420, hud_y + line_h * 3 - 10),
+                      (0, 0, 0), -1)
+        cv2.putText(debug, f"dX: {dx_mm:+.3f} mm", (hud_x, hud_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 200, 255), 2, cv2.LINE_AA)
+        cv2.putText(debug, f"dY: {dy_mm:+.3f} mm", (hud_x, hud_y + line_h),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 200, 255), 2, cv2.LINE_AA)
+        cv2.putText(debug, f"dC: {drot_deg:+.1f} deg", (hud_x, hud_y + line_h * 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 200, 255), 2, cv2.LINE_AA)
 
         log.info("detect_part [%s]: dx=%.3fmm dy=%.3fmm drot=%.1f conf=%.2f contours=%d",
                  part_id or "stock", dx_mm, dy_mm, drot_deg, confidence, len(filtered))

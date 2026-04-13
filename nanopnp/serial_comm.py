@@ -69,7 +69,18 @@ class SerialConnection:
 
         import serial
         with self._lock:
-            self._serial = serial.Serial(self._port, self._baud, timeout=5)
+            # macOS rejects non-standard baud rates (e.g. 250000) via termios.
+            # Always open at a standard baud first, then switch via the
+            # IOSSIOSPEED ioctl which pyserial triggers when you assign .baudrate.
+            # This works reliably on both macOS and Linux.
+            is_standard = self._baud in (9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600)
+            if is_standard:
+                self._serial = serial.Serial(self._port, self._baud, timeout=5)
+            else:
+                logger.info("Non-standard baud %d — opening at 9600 then switching via IOSSIOSPEED",
+                            self._baud)
+                self._serial = serial.Serial(self._port, 9600, timeout=5)
+                self._serial.baudrate = self._baud
             time.sleep(2)  # wait for controller boot/reset
             # drain startup messages
             while self._serial.in_waiting:

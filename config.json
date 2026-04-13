@@ -5,32 +5,32 @@
     "axis_limits": {
       "x": {
         "min": 0,
-        "max": 130
+        "max": 130.0
       },
       "y": {
         "min": 0,
-        "max": 170
+        "max": 170.0
       }
     },
-    "travel_feedrate": 1000,
-    "z_feedrate": 500,
+    "travel_feedrate": 1000.0,
+    "z_feedrate": 1000,
     "disable_software_endstops": true
   },
   "z_heights": {
-    "safe": 0,
-    "board_surface": 16,
-    "feeder_pick": 23,
-    "discard": 23
+    "safe": 0.0,
+    "board_surface": 18.0,
+    "feeder_pick": 23.0,
+    "discard": 23.0
   },
   "camera": {
     "device_index": 1,
     "position": {
-      "x": 10.5,
-      "y": 32.7
+      "x": 18.5,
+      "y": 38.5
     },
     "units_per_pixel": {
-      "x": 0.01842105,
-      "y": 0.01133721
+      "x": 0.012860892388451445,
+      "y": 0.013
     },
     "settle_time_ms": 250
   },
@@ -41,23 +41,37 @@
     "place_dwell_ms": 1000
   },
   "paste_dispensing": {
-    "travel_feedrate": 3000,
-    "dispense_feedrate": 300,
-    "extrude_per_mm": 0.05,
-    "dispense_z": 0,
-    "safe_z": -5
+    "feed_xy": 2000,
+    "feed_xy_slow": 2000,
+    "feed_z": 2000,
+    "feed_e0": 160,
+    "feed_paste": 6000,
+    "z_travel": 5.0,
+    "e_prime": 1000,
+    "e_rate": 400,
+    "e_retract": 50
   },
   "board": {
     "origin": {
-      "x": 0,
-      "y": 0
+      "x": 2.0,
+      "y": 8.0
     },
-    "place_z": 16
+    "first_pad_offset": {
+      "x": 7.0,
+      "y": 8.0
+    },
+    "place_z": 40.0,
+    "package_map": {
+      "LQFN-16": "IC_LQFN16",
+      "SOIC-8":  "IC_SOIC8",
+      "SOT-23-6": "IC_SOT236"
+    },
+    "skip_refs_prefixes": ["FID", "TP", "MH", "H"]
   },
   "vision": {
     "max_passes": 3,
     "max_linear_offset_mm": 1.0,
-    "max_angular_offset_deg": 10,
+    "max_angular_offset_deg": 10.0,
     "converge_mm": 0.05,
     "converge_deg": 0.5,
     "hsv": {
@@ -68,10 +82,10 @@
       "val_min": 64,
       "val_max": 255
     },
-    "threshold": 100,
+    "threshold": 190,
     "blur_kernel": 9,
     "min_contour_area": 0.01,
-    "mask_diameter": 525
+    "mask_diameter": 1500
   },
   "parts": {
     "IC_SOIC8": {
@@ -325,14 +339,14 @@
       "part_id": "IC_SOIC8",
       "enabled": true,
       "ref_hole": {
-        "x": 15.0,
-        "y": 79.0,
-        "z": 23.0
+        "x": 13.5,
+        "y": 81.0,
+        "z": 60.0
       },
       "last_hole": {
-        "x": 18.7,
-        "y": 83.5,
-        "z": 23.0
+        "x": 16.2,
+        "y": 81.0,
+        "z": 60.0
       },
       "pitch": 8.0,
       "tape_width": 12.0,
@@ -365,8 +379,8 @@
     {
       "ref": "IC1",
       "part_id": "IC_SOIC8",
-      "x": 73.0,
-      "y": 17.0,
+      "x": 71.5,
+      "y": 21.0,
       "rotation": 0.0,
       "enabled": true
     },
@@ -394,5 +408,9 @@
       "rotation": 0,
       "enabled": false
     }
-  ]
+  ],
+  "controller": {
+    "port": "",
+    "baud": 115200
+  }
 }

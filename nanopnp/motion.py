@@ -121,9 +121,7 @@ class MotionController:
         self._vacuum_is_on = True
 
     def vacuum_off(self) -> None:
-        """Turn vacuum off. No-op if already off."""
-        if not self._vacuum_is_on:
-            return
+        """Turn vacuum off. Always sends off command to guarantee hardware state."""
         logger.info("Vacuum OFF")
         self._serial.send(self._config.vacuum.off_cmd)
         dwell = self._config.vacuum.place_dwell_ms

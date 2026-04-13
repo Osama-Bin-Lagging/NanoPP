@@ -10,11 +10,15 @@ OpenPnP's NullMotionPlanner merges Z and XY into diagonal G1 commands, dragging 
 
 - **Safe motion**: Z retracts before XY travel, always. Never diagonal.
 - **Solder paste dispensing**: Draws paste lines for SOIC8, SOT-23-6, LQFN16 packages via E1 extruder
-- **Pick and place**: Vacuum pick from tape feeders, optional bottom vision alignment, corrected placement
-- **Bottom vision**: OpenCV pipeline (HSV mask → threshold → contour → MinAreaRect) with per-part configs imported from OpenPnP
-- **GUI**: Light-themed tkinter interface with jog controls, camera preview, config editing, job execution
+- **Pick and place**: Vacuum pick from tape feeders, bottom vision alignment, corrected placement
+- **Bottom vision**: OpenCV pipeline (grayscale threshold → contour → density clustering → MinAreaRect) with per-part area filters
+- **GUI**: Tkinter interface with jog controls, camera preview, config editing, job file pickers, local/remote target selector
 - **CLI**: Headless operation via `run.py` commands
 - **G-code export**: Save job output to file without connecting to hardware
+- **G-code visualizer**: 2D/3D path plots, animation, and travel statistics
+- **Remote execution**: Send jobs to a Jetson (or any Linux host) over SCP, monitor status from GUI
+- **Manual joystick control**: Pico-based controller with joystick + buttons for direct machine jog, overrides running jobs via MANUAL switch
+- **Watcher daemon**: Systemd service that picks up file-drop jobs, runs them, archives results
 - **Cross-platform**: macOS + Ubuntu 18+
 
 ## Hardware
@@ -33,7 +37,7 @@ OpenPnP's NullMotionPlanner merges Z and XY into diagonal G1 commands, dragging 
 cd NanoPnP
 uv venv --python python3.12
 source .venv/bin/activate
-uv pip install pyserial opencv-python Pillow gerbonara
+uv pip install pyserial opencv-python Pillow gerbonara matplotlib
 ```
 
 ## Usage
@@ -46,18 +50,54 @@ python run.py --gui
 1. Select serial port from dropdown (or check "Dry Run")
 2. Click Connect
 3. Use jog controls / arrow keys to move
-4. Load board from Gerber directory or use config placements
-5. Run Solder Only / Pick & Place Only / Full Job
+4. Load job files (Edge_Cuts, F_Paste, .pos) via the Job tab file pickers
+5. Choose target: Local or Jetson (remote)
+6. Run Solder Only / Pick & Place Only / Full Job
 
 ### CLI
 ```bash
-python run.py --dry-run home              # home all axes
-python run.py --dry-run jog 50 30         # move to X50 Y30
-python run.py --dry-run paste             # dispense solder paste
-python run.py --dry-run place             # pick and place
-python run.py --dry-run job               # paste + place
-python run.py --dry-run -o out.gcode job  # save G-code to file
+python run.py --dry-run home                # home all axes
+python run.py --dry-run jog 50 30           # move to X50 Y30
+
+# paste dispensing (from Gerber files)
+python run.py --dry-run paste \
+    --edge-cuts board-Edge_Cuts.gbr --paste board-F_Paste.gbr
+
+# pick and place (from .pos file, optional vision)
+python run.py --dry-run place --pos board-top.pos
+python run.py --dry-run --vision place --pos board-top.pos
+
+# full job: paste then place
+python run.py --dry-run job \
+    --edge-cuts board-Edge_Cuts.gbr --paste board-F_Paste.gbr \
+    --pos board-top.pos
+
+# export G-code to file
+python run.py --dry-run -o out.gcode job \
+    --edge-cuts board-Edge_Cuts.gbr --paste board-F_Paste.gbr \
+    --pos board-top.pos
 ```
+
+### G-code Visualizer
+```bash
+python -m nanopnp.visualizer output.gcode             # 2D plot
+python -m nanopnp.visualizer --3d output.gcode         # 3D machine scene
+python -m nanopnp.visualizer --animate output.gcode    # step-by-step playback
+python -m nanopnp.visualizer --stats output.gcode      # travel summary
+```
+
+### Manual Joystick Control
+```bash
+# uses controller.port from config.json
+python run.py manual
+
+# or specify the controller port explicitly
+python run.py manual --controller-port /dev/tty.usbmodem1401
+```
+
+Requires a Pico controller sending `B:<hex_buttons> X1:<hex> Y1:<hex> X2:<hex>` frames over serial (11 buttons: 8 push, 2 joystick click, 1 MANUAL switch + 3 joystick ADC values).
+
+Flip the MANUAL switch to take over the machine — any running NanoPnP process (GUI or CLI job) is gracefully terminated via SIGTERM, then the machine port is opened in relative (G91) mode. Joysticks provide coarse XY/yaw, buttons provide fine step control. SEL1 toggles tool (T0/T1), SEL2 toggles vacuum. Flip MANUAL off to release the port.
 
 ### Keyboard Shortcuts (GUI)
 | Key | Action |
@@ -73,40 +113,71 @@ python run.py --dry-run -o out.gcode job  # save G-code to file
 All parameters are in `config.json` and editable from the GUI's Setup tab:
 
 - **Machine**: serial port, feedrate (XY: 1000, Z: 500), axis limits
-- **Z heights**: safe (0), board (16), feeder (23), discard (23)
+- **Z heights**: safe (0), retract (30), board (16), feeder (23), discard (23)
+- **Paste dispensing**: feedrates (XY, Z, E), extrusion rate, prime/retract amounts, travel Z
 - **Feeders**: position, pitch, tape direction, feed count tracking
-- **Parts**: SOIC8/SOT236/LQFN16 with heights and pad layouts from OpenPnP packages.xml
-- **Vision**: HSV thresholds, blur, mask diameter, convergence tolerance
+- **Parts**: SOIC8/SOT236/LQFN16 with heights and pad layouts
+- **Board**: origin, first pad offset, package map (.pos package names → feeder part IDs), skip prefixes (FID, TP, MH, H)
+- **Vision**: grayscale threshold, per-part area limits, mask diameter, convergence tolerance
 - **Camera**: device index, position, units-per-pixel (calibrate via GUI)
+- **Controller** (optional): joystick port, baud, deadzone, step sizes, feedrates for manual mode
+- **Remote** (optional): SSH host, user, key, incoming/status paths for Jetson target
 
 Changes made in the GUI auto-save to `config.json`.
 
 ## Architecture
 
 ```
-run.py                 CLI entry point
+run.py                   CLI entry point
 nanopnp/
-  config.py            JSON config loader + saver (dataclasses)
-  serial_comm.py       Thread-safe serial I/O, dry-run mode, G-code file export
-  motion.py            Safe Z sequencing, vacuum control, tool select, axis limits
-  board_parser.py      KiCad Gerber/.pos parser (uses gerbonara)
-  paste_dispenser.py   Solder paste line generation for 3 package types
-  feeder.py            Tape feeder position calculation + state persistence
-  vision.py            OpenCV bottom vision pipeline + UPP calibration
-  pnp_engine.py        Pick-align-place orchestrator with retry + drift tracking
-  gui.py               Tkinter GUI (light theme, cross-platform)
+  config.py              JSON config loader + saver (dataclasses)
+  serial_comm.py         Thread-safe serial I/O, dry-run mode, G-code file export
+  motion.py              Safe Z sequencing, vacuum control, tool select, axis limits
+  board_parser.py        KiCad Gerber/.pos parser (uses gerbonara)
+  paste_dispenser.py     Solder paste line generation for 3 package types
+  feeder.py              Tape feeder position calculation + state persistence
+  vision.py              OpenCV bottom vision pipeline + UPP calibration
+  pnp_engine.py          Pick-align-place orchestrator with retry + drift tracking
+  gui.py                 Tkinter GUI (light theme, cross-platform)
+  job_inputs.py          Job file classification (Edge_Cuts, F_Paste, .pos → mode)
+  remote.py              SCP job upload + SSH status polling for Jetson targets
+  manual_control.py      Joystick/button manual jog via external controller
+  visualizer.py          G-code path plotting, animation, travel stats
+  watcher.py             File-drop daemon: watch incoming/ → run job → archive
+scripts/
+  install-watcher.sh     Systemd service installer for the watcher daemon
+  nanopnp-watcher.service  Systemd unit template
+tune_vision.py           Vision threshold tuning across captured images
 ```
 
 ## Pick-and-Place Cycle
 
 ```
 For each enabled placement:
-  1. PICK:   safe_move to feeder → lower Z → vacuum ON → retract
-  2. ROTATE: compensate for tape orientation (E axis)
-  3. ALIGN:  (if vision on) move to camera → detect → correct (up to 3 passes)
-  4. PLACE:  safe_move to board → lower Z (board + part height) → vacuum OFF ��� retract
-  5. ADVANCE feeder count
+  1. PICK:    safe_move to feeder → lower Z → vacuum ON → retract to Z_retract
+  2. ROTATE:  compensate for tape orientation (E axis)
+  3. ALIGN:   (if --vision) move to camera at Z_retract → detect → correct (up to 3 passes)
+  4. PLACE:   safe_move to board → lower Z to board_surface → vacuum OFF → retract
+  5. ADVANCE: increment feeder count
 ```
+
+## Remote / Jetson Deployment
+
+NanoPnP supports a two-tier setup: laptop GUI for design & monitoring, remote host (e.g. Jetson) for headless execution.
+
+**On the Jetson:**
+```bash
+cd ~/NanoPnP
+sudo scripts/install-watcher.sh
+```
+
+This installs a systemd service that watches `~/nanopnp/incoming/` for job files. When a complete set (Edge_Cuts + F_Paste + .pos) arrives, the watcher runs the job, writes progress to `status.json`, and archives results to `~/nanopnp/done/` (or `~/nanopnp/failed/` on error). Retries up to 3 times with exponential backoff.
+
+**From the laptop GUI:**
+1. Configure the Jetson target in Setup tab (host, user, SSH key)
+2. Select "Jetson" target in the toolbar
+3. Load job files and click Run — files are uploaded via SCP
+4. Status bar polls `status.json` for live progress
 
 ## Vision Calibration
 

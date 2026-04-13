@@ -1,0 +1,28 @@
+[Unit]
+Description=NanoPnP file-drop watcher
+After=network.target
+
+[Service]
+Type=simple
+# Run as the user that owns the NanoPnP checkout — install script
+# rewrites User/Group/WorkingDirectory at install time.
+User=@USER@
+Group=@USER@
+WorkingDirectory=@INSTALL_DIR@
+Environment=PYTHONPATH=@INSTALL_DIR@
+# --dry-run is off by default; enable for bench tests that generate
+# gcode but don't touch the serial port.
+ExecStart=/usr/bin/python3 -m nanopnp.watcher \
+    --incoming @DATA_DIR@/incoming \
+    --archive  @DATA_DIR@/done \
+    --failed   @DATA_DIR@/failed \
+    --config   @INSTALL_DIR@/config.json \
+    --status   @DATA_DIR@/status.json \
+    --work-dir @DATA_DIR@/work
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

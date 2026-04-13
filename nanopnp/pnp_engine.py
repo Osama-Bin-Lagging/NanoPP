@@ -119,6 +119,7 @@ class PnPEngine:
         # Phase 2: pick and place
         log.info("Phase 2: Pick and place (%d components)", len(enabled))
         self._motion.tool_select(0)  # ensure T0 nozzle
+        self._motion.home()          # G28 — known start state
 
         results: list[PlacementResult] = []
         placed = 0
@@ -166,23 +167,29 @@ class PnPEngine:
 
     def _pick_and_place_with_retry(self, placement: Placement) -> PlacementResult:
         """Try pick-and-place up to MAX_RETRIES times."""
-        for attempt in range(self.MAX_RETRIES):
+        try:
+            for attempt in range(self.MAX_RETRIES):
+                try:
+                    return self._pick_and_place(placement)
+                except (FeederError, VisionError, Exception) as e:
+                    log.warning("Attempt %d/%d failed for %s: %s",
+                                attempt + 1, self.MAX_RETRIES, placement.ref, e)
+                    self._discard()
+                    if attempt == self.MAX_RETRIES - 1:
+                        return PlacementResult(
+                            ref=placement.ref, part_id=placement.part_id,
+                            success=False,
+                            nominal=(placement.x, placement.y, placement.rotation),
+                            corrected=(0, 0, 0), corrections=(0, 0, 0),
+                            vision_passes=0, error=str(e), duration_s=0,
+                        )
+            # unreachable but satisfies type checker
+            raise RuntimeError("retry loop exited unexpectedly")
+        finally:
             try:
-                return self._pick_and_place(placement)
-            except (FeederError, VisionError, Exception) as e:
-                log.warning("Attempt %d/%d failed for %s: %s",
-                            attempt + 1, self.MAX_RETRIES, placement.ref, e)
-                self._discard()
-                if attempt == self.MAX_RETRIES - 1:
-                    return PlacementResult(
-                        ref=placement.ref, part_id=placement.part_id,
-                        success=False,
-                        nominal=(placement.x, placement.y, placement.rotation),
-                        corrected=(0, 0, 0), corrections=(0, 0, 0),
-                        vision_passes=0, error=str(e), duration_s=0,
-                    )
-        # unreachable but satisfies type checker
-        raise RuntimeError("retry loop exited unexpectedly")
+                self._motion.vacuum_off()
+            except Exception:
+                pass
 
     def _pick_and_place(self, p: Placement) -> PlacementResult:
         """Execute one pick → align → place cycle."""
@@ -201,27 +208,28 @@ class PnPEngine:
         self._motion.safe_move_to(pick_pos.x, pick_pos.y)
         self._motion.move_to(z=pick_pos.z)
         self._motion.vacuum_on()
-        self._motion.move_to(z=self._z.safe)
+        # Partial retract at the feeder — not all the way to safe Z. The
+        # subsequent safe_move_to(camera) will finish the retract.
+        self._motion.move_to(z=self._z.retract)
 
         # ── ROTATE ──
         # Compensate for part orientation in tape:
         # nozzle_angle = desired_placement_angle - angle_part_sits_in_tape
         nozzle_rot = p.rotation - pick_rot
-        self._motion.move_to(e=nozzle_rot)
+        self._motion.move_to(e=nozzle_rot, feedrate=1000)
 
         # ── ALIGN ──
         dx, dy, drot = 0.0, 0.0, 0.0
         vision_passes = 0
 
+        # Camera waypoint — nozzle passes through the camera XY at safe Z.
+        # safe_move_to handles the Z=30 → Z=safe retract before the XY move.
+        self._motion.safe_move_to(self._cam.x, self._cam.y)
+
         if self.vision_enabled and self._vision is not None:
-            # Travel to camera (nozzle already pre-rotated)
-            self._motion.safe_move_to(self._cam.x, self._cam.y)
-            self._motion.move_to(z=part_height)
-
-            # Multi-pass alignment
+            # For alignment, drop to imaging height and run the passes.
+            self._motion.move_to(z=self._z.retract)
             dx, dy, drot, vision_passes = self._align(part, part_id=p.part_id)
-
-            # Retract from camera
             self._motion.move_to(z=self._z.safe)
 
         # ── PLACE ──
@@ -240,7 +248,7 @@ class PnPEngine:
         log.info("Place %s at (%.3f, %.3f, %.1f) corrections=(%.3f, %.3f, %.1f)",
                  p.ref, final_x, final_y, final_rot, corr_dx, corr_dy, drot)
 
-        place_z = self._board_z + part_height
+        place_z = self._board_z
         self._motion.safe_move_to(final_x, final_y, e=final_rot)
         self._motion.move_to(z=place_z)
         self._motion.vacuum_off()

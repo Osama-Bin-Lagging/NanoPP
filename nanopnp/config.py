@@ -7,7 +7,7 @@ Z axis: 0 = safe/top, higher values = physically lower toward board.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -71,10 +71,17 @@ class ZHeights:
     board_surface: float
     feeder_pick: float
     discard: float
+    retract: float = 30.0  # intermediate Z after pick / during vision
 
     @classmethod
     def from_dict(cls, d: dict) -> ZHeights:
-        return cls(**d)
+        return cls(
+            safe=d["safe"],
+            board_surface=d["board_surface"],
+            feeder_pick=d["feeder_pick"],
+            discard=d["discard"],
+            retract=d.get("retract", 30.0),
+        )
 
 
 @dataclass(slots=True)
@@ -108,25 +115,113 @@ class VacuumConfig:
 
 @dataclass(slots=True)
 class PasteConfig:
-    travel_feedrate: float
-    dispense_feedrate: float
-    extrude_per_mm: float
-    dispense_z: float
-    safe_z: float
+    feed_xy: float          # XY travel feedrate (mm/min)
+    feed_xy_slow: float     # XY feedrate during dispense
+    feed_z: float           # Z feedrate
+    feed_e0: float          # extruder 0 (nozzle) max feedrate
+    feed_paste: float       # extruder 1 (paste) feedrate
+    z_travel: float         # safe Z above work surface
+    e_prime: float          # paste prime push before first row
+    e_rate: float           # E units per row
+    e_retract: float        # E retract after each row
 
     @classmethod
     def from_dict(cls, d: dict) -> PasteConfig:
-        return cls(**d)
+        return cls(
+            feed_xy=d.get("feed_xy", d.get("travel_feedrate", 2000)),
+            feed_xy_slow=d.get("feed_xy_slow", d.get("dispense_feedrate", 2000)),
+            feed_z=d.get("feed_z", 2000),
+            feed_e0=d.get("feed_e0", 160),
+            feed_paste=d.get("feed_paste", 6000),
+            z_travel=d.get("z_travel", d.get("safe_z", 5.0)),
+            e_prime=d.get("e_prime", 1000),
+            e_rate=d.get("e_rate", d.get("extrude_per_mm", 400)),
+            e_retract=d.get("e_retract", 50),
+        )
 
 
 @dataclass(slots=True)
 class BoardConfig:
-    origin: XY
+    origin: XY             # machine XY of the PCB's bottom-left corner
+    first_pad_offset: XY   # distance from board corner to the corner-most pad
     place_z: float
+    # Ordered list of (substring, part_id) pairs — first substring found
+    # in a .pos `Package` column wins. Lets you map KiCad library names
+    # like "SOIC-8_3.9x4.9mm_P1.27mm" → your abstract feeder part id
+    # "IC_SOIC8" without touching code. Empty dict = passthrough.
+    package_map: dict[str, str] = field(default_factory=dict)
+    # Reference-designator prefixes to skip when loading a .pos file.
+    # Defaults match the common KiCad conventions for non-pickable items:
+    # FID = fiducials, H = mounting holes, TP = test points, MH = mounts.
+    skip_refs_prefixes: list[str] = field(default_factory=lambda: ["FID", "TP", "MH", "H"])
 
     @classmethod
     def from_dict(cls, d: dict) -> BoardConfig:
-        return cls(origin=XY(**d["origin"]), place_z=d["place_z"])
+        return cls(
+            origin=XY(**d["origin"]),
+            first_pad_offset=XY(**d.get("first_pad_offset", {"x": 0.0, "y": 0.0})),
+            place_z=d["place_z"],
+            package_map=dict(d.get("package_map", {})),
+            skip_refs_prefixes=list(d.get("skip_refs_prefixes", ["FID", "TP", "MH", "H"])),
+        )
+
+
+@dataclass(slots=True)
+class ControllerConfig:
+    """External joystick/button controller for manual mode.
+
+    Optional — absent from config.json means `run.py manual` requires
+    --controller-port on the command line.
+    """
+    port: str = ""
+    baud: int = 115200
+    dead_low: int = 1900
+    dead_high: int = 2150
+    joy_max: int = 4095
+    max_step_xy: float = 2.0
+    max_step_yaw: float = 1.0
+    fine_xy: float = 0.2
+    fine_z: float = 2.0
+    fine_yaw: float = 0.5
+    feed_rate: int = 1000
+    feed_rate_slow: int = 200
+
+    @classmethod
+    def from_dict(cls, d: dict) -> ControllerConfig:
+        return cls(**{k: v for k, v in d.items() if k in cls.__slots__})
+
+    def is_configured(self) -> bool:
+        return bool(self.port)
+
+
+@dataclass(slots=True)
+class RemoteConfig:
+    """Jetson target for the GUI's Target selector.
+
+    Optional — absent from config.json means the GUI hides the selector
+    and runs everything locally. The watcher on the Jetson does NOT read
+    this (it's a laptop-side concern only).
+    """
+    host: str = ""
+    user: str = ""
+    incoming_path: str = "~/nanopnp/incoming"
+    status_path: str = "~/nanopnp/status.json"
+    ssh_key: str = ""         # "" = default identity / ssh-agent
+    port: int = 22
+
+    @classmethod
+    def from_dict(cls, d: dict) -> RemoteConfig:
+        return cls(
+            host=d.get("host", ""),
+            user=d.get("user", ""),
+            incoming_path=d.get("incoming_path", "~/nanopnp/incoming"),
+            status_path=d.get("status_path", "~/nanopnp/status.json"),
+            ssh_key=d.get("ssh_key", ""),
+            port=d.get("port", 22),
+        )
+
+    def is_configured(self) -> bool:
+        return bool(self.host and self.user)
 
 
 @dataclass(slots=True)
@@ -257,6 +352,8 @@ class NanoPnPConfig:
     parts: dict[str, PartDef]
     feeders: dict[str, FeederConfig]
     placements: list[Placement]
+    controller: ControllerConfig = field(default_factory=ControllerConfig)
+    remote: RemoteConfig = field(default_factory=RemoteConfig)
 
     def feeder_for_part(self, part_id: str) -> FeederConfig | None:
         for f in self.feeders.values():
@@ -313,6 +410,8 @@ def load_config(path: str | Path = "config.json") -> NanoPnPConfig:
                 for slot, fdata in raw["feeders"].items()
             },
             placements=[Placement.from_dict(p) for p in raw["placements"]],
+            controller=ControllerConfig.from_dict(raw.get("controller", {})),
+            remote=RemoteConfig.from_dict(raw.get("remote", {})),
         )
     except (KeyError, TypeError) as e:
         raise ConfigError(f"Config structure error: {e}") from e
@@ -337,6 +436,7 @@ def save_config(config: NanoPnPConfig, path: str | Path = "config.json") -> None
             "board_surface": config.z_heights.board_surface,
             "feeder_pick": config.z_heights.feeder_pick,
             "discard": config.z_heights.discard,
+            "retract": config.z_heights.retract,
         },
         "camera": {
             "device_index": config.camera.device_index,
@@ -351,15 +451,25 @@ def save_config(config: NanoPnPConfig, path: str | Path = "config.json") -> None
             "place_dwell_ms": config.vacuum.place_dwell_ms,
         },
         "paste_dispensing": {
-            "travel_feedrate": config.paste_dispensing.travel_feedrate,
-            "dispense_feedrate": config.paste_dispensing.dispense_feedrate,
-            "extrude_per_mm": config.paste_dispensing.extrude_per_mm,
-            "dispense_z": config.paste_dispensing.dispense_z,
-            "safe_z": config.paste_dispensing.safe_z,
+            "feed_xy": config.paste_dispensing.feed_xy,
+            "feed_xy_slow": config.paste_dispensing.feed_xy_slow,
+            "feed_z": config.paste_dispensing.feed_z,
+            "feed_e0": config.paste_dispensing.feed_e0,
+            "feed_paste": config.paste_dispensing.feed_paste,
+            "z_travel": config.paste_dispensing.z_travel,
+            "e_prime": config.paste_dispensing.e_prime,
+            "e_rate": config.paste_dispensing.e_rate,
+            "e_retract": config.paste_dispensing.e_retract,
         },
         "board": {
             "origin": {"x": config.board.origin.x, "y": config.board.origin.y},
+            "first_pad_offset": {
+                "x": config.board.first_pad_offset.x,
+                "y": config.board.first_pad_offset.y,
+            },
             "place_z": config.board.place_z,
+            "package_map": dict(config.board.package_map),
+            "skip_refs_prefixes": list(config.board.skip_refs_prefixes),
         },
         "vision": {
             "max_passes": config.vision.max_passes,
@@ -402,4 +512,28 @@ def save_config(config: NanoPnPConfig, path: str | Path = "config.json") -> None
             for p in config.placements
         ],
     }
+    if config.controller.is_configured():
+        raw["controller"] = {
+            "port": config.controller.port,
+            "baud": config.controller.baud,
+            "dead_low": config.controller.dead_low,
+            "dead_high": config.controller.dead_high,
+            "joy_max": config.controller.joy_max,
+            "max_step_xy": config.controller.max_step_xy,
+            "max_step_yaw": config.controller.max_step_yaw,
+            "fine_xy": config.controller.fine_xy,
+            "fine_z": config.controller.fine_z,
+            "fine_yaw": config.controller.fine_yaw,
+            "feed_rate": config.controller.feed_rate,
+            "feed_rate_slow": config.controller.feed_rate_slow,
+        }
+    if config.remote.is_configured():
+        raw["remote"] = {
+            "host": config.remote.host,
+            "user": config.remote.user,
+            "incoming_path": config.remote.incoming_path,
+            "status_path": config.remote.status_path,
+            "ssh_key": config.remote.ssh_key,
+            "port": config.remote.port,
+        }
     Path(path).write_text(json.dumps(raw, indent=2) + "\n")
