@@ -48,22 +48,23 @@ class FeederManager:
     # ── Tape geometry ───────────────────────────────────────
 
     def tape_direction(self, feeder: FeederConfig) -> tuple[float, float]:
-        """Normalized 2D direction vector from ref_hole to last_hole."""
+        """Normalized 2D direction vector from ref_hole to last_hole.
+
+        Returns (0, 0) if ref_hole == last_hole (single-part feeder).
+        """
         dx = feeder.last_hole.x - feeder.ref_hole.x
         dy = feeder.last_hole.y - feeder.ref_hole.y
         length = math.hypot(dx, dy)
         if length < 0.01:
-            raise FeederError(
-                f"Feeder {feeder.slot}: ref_hole and last_hole are too close "
-                f"({length:.3f}mm) to determine tape direction"
-            )
+            return 0.0, 0.0
         return dx / length, dy / length
 
     def get_pick_position(self, feeder: FeederConfig) -> XYZ:
         """Calculate pick position for current feed_count.
 
+        Pitch is derived from distance between ref_hole and last_hole.
         pick_pos = ref_hole + feed_count * pitch * tape_direction
-        Z is always ref_hole.z (tape surface height).
+        If ref_hole == last_hole, always picks from ref_hole.
         """
         dir_x, dir_y = self.tape_direction(feeder)
         offset = feeder.feed_count * feeder.pitch

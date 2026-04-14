@@ -221,27 +221,44 @@ class VisionSystem:
         v = self._vision_config
         debug = frame.copy()
 
-        # Threshold value: use the configurable threshold from config
-        # Good values for shiny pads under mixed lighting: 180-220
-        threshold = v.threshold
-
-        # Per-part area limits (in pixels). Tuned from real captured images.
-        # SOIC8 pads come out as blobs of ~4000-5500 px under typical lighting.
+        # Per-part pipeline settings. Tuned from real captured images.
+        # SOIC8: large bright pads — simple grayscale threshold works.
+        # SOT236/LQFN16: pads blend with body at any global threshold.
+        #   Use CLAHE (contrast-limited adaptive histogram equalization)
+        #   + circular mask to separate pads from body/nozzle.
         if part_id == "IC_SOIC8":
-            min_area_px = 500   # reject noise specks (areas ~100-300)
+            threshold = v.threshold       # 190
+            min_area_px = 500
             max_area_px = 6000
+            use_clahe = False
         elif part_id == "IC_SOT236":
+            threshold = 230               # post-CLAHE threshold
             min_area_px = 200
-            max_area_px = 3000
+            max_area_px = 8000
+            use_clahe = True
         elif part_id == "IC_LQFN16":
-            min_area_px = 150
-            max_area_px = 2500
+            threshold = 230
+            min_area_px = 200
+            max_area_px = 8000
+            use_clahe = True
         else:
+            threshold = v.threshold
             min_area_px = 80
             max_area_px = 5000
+            use_clahe = False
 
-        # 1-2. Gray + Blur
+        # 1-2. Gray + preprocessing
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        if use_clahe:
+            # Circular mask to crop to nozzle area, then CLAHE to
+            # boost local contrast so pads pop out from IC body.
+            mask = np.zeros((h, w), dtype=np.uint8)
+            cv2.circle(mask, (w // 2, h // 2), v.mask_diameter // 2, 255, -1)
+            gray = cv2.bitwise_and(gray, gray, mask=mask)
+            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+            gray = clahe.apply(gray)
+
         k = v.blur_kernel
         if k % 2 == 0:
             k += 1
@@ -252,7 +269,8 @@ class VisionSystem:
 
         # 4. Morphological opening to remove noise specks
         kernel = np.ones((3, 3), np.uint8)
-        cleaned = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+        morph_iters = 2 if use_clahe else 1
+        cleaned = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=morph_iters)
 
         # 5. FindContours (external) — much faster and avoids hierarchy issues
         contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)

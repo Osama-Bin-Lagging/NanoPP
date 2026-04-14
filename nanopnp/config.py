@@ -281,6 +281,8 @@ class PartDef:
     body_width: float
     body_length: float
     pads: list[Pad]
+    yaw_max: float = 30.0   # max detected yaw (deg) to trust; beyond → ignore
+    yaw_snap: float = 0.0   # if >0, snap yaw to nearest multiple (for square ICs)
 
     @classmethod
     def from_dict(cls, name: str, d: dict) -> PartDef:
@@ -290,6 +292,8 @@ class PartDef:
             body_width=d["body"]["width"],
             body_length=d["body"]["length"],
             pads=[Pad(**p) for p in d["pads"]],
+            yaw_max=d.get("yaw_max", 30.0),
+            yaw_snap=d.get("yaw_snap", 0.0),
         )
 
 
@@ -301,11 +305,19 @@ class FeederConfig:
     enabled: bool
     ref_hole: XYZ
     last_hole: XYZ
-    pitch: float
     tape_width: float
     rotation: float
     feed_count: int
     max_count: int
+
+    @property
+    def pitch(self) -> float:
+        """Pitch = distance between ref_hole and last_hole (IC1 → IC2)."""
+        import math
+        return math.hypot(
+            self.last_hole.x - self.ref_hole.x,
+            self.last_hole.y - self.ref_hole.y,
+        )
 
     @classmethod
     def from_dict(cls, slot: str, d: dict) -> FeederConfig:
@@ -316,8 +328,7 @@ class FeederConfig:
             enabled=d["enabled"],
             ref_hole=XYZ(**d["ref_hole"]),
             last_hole=XYZ(**d["last_hole"]),
-            pitch=d["pitch"],
-            tape_width=d["tape_width"],
+            tape_width=d.get("tape_width", 8.0),
             rotation=d["rotation"],
             feed_count=d["feed_count"],
             max_count=d["max_count"],
@@ -491,6 +502,8 @@ def save_config(config: NanoPnPConfig, path: str | Path = "config.json") -> None
             name: {
                 "height": p.height,
                 "body": {"width": p.body_width, "length": p.body_length},
+                "yaw_max": p.yaw_max,
+                "yaw_snap": p.yaw_snap,
                 "pads": [{"id": pad.id, "x": pad.x, "y": pad.y, "width": pad.width, "height": pad.height}
                          for pad in p.pads],
             }
@@ -501,7 +514,7 @@ def save_config(config: NanoPnPConfig, path: str | Path = "config.json") -> None
                 "id": f.id, "part_id": f.part_id, "enabled": f.enabled,
                 "ref_hole": {"x": f.ref_hole.x, "y": f.ref_hole.y, "z": f.ref_hole.z},
                 "last_hole": {"x": f.last_hole.x, "y": f.last_hole.y, "z": f.last_hole.z},
-                "pitch": f.pitch, "tape_width": f.tape_width, "rotation": f.rotation,
+                "tape_width": f.tape_width, "rotation": f.rotation,
                 "feed_count": f.feed_count, "max_count": f.max_count,
             }
             for slot, f in config.feeders.items()

@@ -20,13 +20,14 @@
     "safe": 0.0,
     "board_surface": 18.0,
     "feeder_pick": 23.0,
-    "discard": 23.0
+    "discard": 23.0,
+    "retract": 30.0
   },
   "camera": {
     "device_index": 1,
     "position": {
-      "x": 18.5,
-      "y": 38.5
+      "x": 16.1,
+      "y": 46.6
     },
     "units_per_pixel": {
       "x": 0.012860892388451445,
@@ -53,20 +54,25 @@
   },
   "board": {
     "origin": {
-      "x": 2.0,
-      "y": 8.0
+      "x": 59.3,
+      "y": 17.0
     },
     "first_pad_offset": {
       "x": 7.0,
       "y": 8.0
     },
-    "place_z": 40.0,
+    "place_z": 50.0,
     "package_map": {
       "LQFN-16": "IC_LQFN16",
-      "SOIC-8":  "IC_SOIC8",
+      "SOIC-8": "IC_SOIC8",
       "SOT-23-6": "IC_SOT236"
     },
-    "skip_refs_prefixes": ["FID", "TP", "MH", "H"]
+    "skip_refs_prefixes": [
+      "FID",
+      "TP",
+      "MH",
+      "H"
+    ]
   },
   "vision": {
     "max_passes": 3,
@@ -85,7 +91,7 @@
     "threshold": 190,
     "blur_kernel": 9,
     "min_contour_area": 0.01,
-    "mask_diameter": 1500
+    "mask_diameter": 600
   },
   "parts": {
     "IC_SOIC8": {
@@ -94,6 +100,8 @@
         "width": 3.9,
         "length": 4.9
       },
+      "yaw_max": 30,
+      "yaw_snap": 0,
       "pads": [
         {
           "id": 1,
@@ -159,6 +167,8 @@
         "width": 1.6,
         "length": 2.9
       },
+      "yaw_max": 30,
+      "yaw_snap": 0,
       "pads": [
         {
           "id": 1,
@@ -210,6 +220,8 @@
         "width": 3.0,
         "length": 3.0
       },
+      "yaw_max": 45,
+      "yaw_snap": 45,
       "pads": [
         {
           "id": 1,
@@ -339,17 +351,35 @@
       "part_id": "IC_SOIC8",
       "enabled": true,
       "ref_hole": {
-        "x": 13.5,
-        "y": 81.0,
-        "z": 60.0
+        "x": 11.4,
+        "y": 90.0,
+        "z": 65.0
       },
       "last_hole": {
-        "x": 16.2,
-        "y": 81.0,
+        "x": 11.9,
+        "y": 98.4,
         "z": 60.0
       },
-      "pitch": 8.0,
       "tape_width": 12.0,
+      "rotation": 0.0,
+      "feed_count": 0,
+      "max_count": 5000
+    },
+    "F2": {
+      "id": "lqfn16",
+      "part_id": "IC_LQFN16",
+      "enabled": true,
+      "ref_hole": {
+        "x": 25.2,
+        "y": 90.5,
+        "z": 65.0
+      },
+      "last_hole": {
+        "x": 25.2,
+        "y": 90.5,
+        "z": 60.0
+      },
+      "tape_width": 8.0,
       "rotation": 0.0,
       "feed_count": 0,
       "max_count": 5000
@@ -357,60 +387,95 @@
     "F3": {
       "id": "sot236",
       "part_id": "IC_SOT236",
-      "enabled": false,
+      "enabled": true,
       "ref_hole": {
-        "x": 3.5,
-        "y": 74.3,
-        "z": 16
+        "x": 2.6,
+        "y": 92.5,
+        "z": 65.0
       },
       "last_hole": {
-        "x": 3.5,
-        "y": 78.3,
-        "z": 0
+        "x": 2.9,
+        "y": 96.5,
+        "z": 60.0
       },
-      "pitch": 4,
-      "tape_width": 8,
-      "rotation": -90,
+      "tape_width": 8.0,
+      "rotation": -90.0,
       "feed_count": 0,
-      "max_count": 0
+      "max_count": 5000
     }
   },
   "placements": [
     {
-      "ref": "IC1",
+      "ref": "QFN_1",
+      "part_id": "IC_LQFN16",
+      "x": 80.6,
+      "y": 68.6,
+      "rotation": 45.0,
+      "enabled": false
+    },
+    {
+      "ref": "SOP8_1",
       "part_id": "IC_SOIC8",
-      "x": 71.5,
-      "y": 21.0,
+      "x": 67.3,
+      "y": 28.1,
       "rotation": 0.0,
       "enabled": true
     },
     {
-      "ref": "IC2",
+      "ref": "SOP8_3",
       "part_id": "IC_SOIC8",
-      "x": 211.06,
-      "y": 28.62,
-      "rotation": 0,
+      "x": 86.2,
+      "y": 28.7,
+      "rotation": 0.0,
       "enabled": false
     },
     {
-      "ref": "IC3",
+      "ref": "SOP8_5",
       "part_id": "IC_SOIC8",
-      "x": 183.12,
-      "y": 28.62,
-      "rotation": 0,
+      "x": 104.8,
+      "y": 30.0,
+      "rotation": 0.0,
       "enabled": false
     },
     {
-      "ref": "IC4",
+      "ref": "SOP8_7",
       "part_id": "IC_SOIC8",
-      "x": 157.72,
-      "y": 28.62,
-      "rotation": 0,
+      "x": 123.8,
+      "y": 31.0,
+      "rotation": 0.0,
+      "enabled": false
+    },
+    {
+      "ref": "SOT6_1",
+      "part_id": "IC_SOT236",
+      "x": 66.6,
+      "y": 45.6,
+      "rotation": 0.0,
+      "enabled": true
+    },
+    {
+      "ref": "SOT6_2",
+      "part_id": "IC_SOT236",
+      "x": 86.0,
+      "y": 46.2,
+      "rotation": 0.0,
+      "enabled": false
+    },
+    {
+      "ref": "SOT6_3",
+      "part_id": "IC_SOT236",
+      "x": 123.7,
+      "y": 49.0,
+      "rotation": 0.0,
+      "enabled": false
+    },
+    {
+      "ref": "SOT6_4",
+      "part_id": "IC_SOT236",
+      "x": 195.2,
+      "y": 47.6,
+      "rotation": 0.0,
       "enabled": false
     }
-  ],
-  "controller": {
-    "port": "",
-    "baud": 115200
-  }
+  ]
 }

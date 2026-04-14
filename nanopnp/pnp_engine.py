@@ -72,9 +72,11 @@ class PnPEngine:
         self._feeders = feeders
         self._vision = vision
         self.vision_enabled = vision_enabled
+        self.vision_apply = True  # False = detect but ignore corrections
 
         self._z = config.z_heights
         self._cam = config.camera.position
+        self._cam_config = config.camera
         self._board_z = config.board.place_z
         self._max_passes = config.vision.max_passes
         self._converge_mm = config.vision.converge_mm
@@ -212,12 +214,6 @@ class PnPEngine:
         # subsequent safe_move_to(camera) will finish the retract.
         self._motion.move_to(z=self._z.retract)
 
-        # ── ROTATE ──
-        # Compensate for part orientation in tape:
-        # nozzle_angle = desired_placement_angle - angle_part_sits_in_tape
-        nozzle_rot = p.rotation - pick_rot
-        self._motion.move_to(e=nozzle_rot, feedrate=1000)
-
         # ── ALIGN ──
         dx, dy, drot = 0.0, 0.0, 0.0
         vision_passes = 0
@@ -225,6 +221,12 @@ class PnPEngine:
         # Camera waypoint — nozzle passes through the camera XY at safe Z.
         # safe_move_to handles the Z=30 → Z=safe retract before the XY move.
         self._motion.safe_move_to(self._cam.x, self._cam.y)
+
+        # ── ROTATE ──
+        # Rotate at camera position (part is stationary) so rotation
+        # doesn't happen during XY travel to placement.
+        nozzle_rot = p.rotation - pick_rot
+        self._motion.move_to(e=nozzle_rot, feedrate=1000)
 
         if self.vision_enabled and self._vision is not None:
             # For alignment, drop to imaging height and run the passes.
@@ -271,36 +273,85 @@ class PnPEngine:
     # ── Sub-steps ─────────────────────────────────────────────
 
     def _align(self, part, part_id: str = "") -> tuple[float, float, float, int]:
-        """Multi-pass vision alignment. Returns (total_dx, total_dy, total_drot, passes)."""
+        """Two-phase vision alignment: correct rotation first, then XY.
+
+        Phase 1 straightens the part (E axis only) so that the subsequent
+        XY measurement is not distorted by the part swinging around the
+        nozzle tip during rotation correction.
+
+        If vision_apply is False, detection still runs (for debug preview)
+        but returns zero corrections — the nozzle stays put.
+        """
         total_dx, total_dy, total_drot = 0.0, 0.0, 0.0
         body_w = part.body_width if part else 0
         body_h = part.body_length if part else 0
+        yaw_max = part.yaw_max if part else 30.0
+        yaw_snap = part.yaw_snap if part else 0.0
+        v = self._config.vision
+        passes_used = 0
+        settle_s = self._cam_config.settle_time_ms / 1000.0
 
-        for pass_num in range(self._max_passes):
+        # ── Phase 1: detect and fix yaw ──
+        time.sleep(settle_s)
+        result = self._vision.detect_part(body_w, body_h, part_id=part_id)
+        passes_used += 1
+        ddx, ddy, ddrot = result.dx_mm, result.dy_mm, result.drot_deg
+        ddrot = self._clamp_yaw(ddrot, yaw_max, yaw_snap, part_id)
+        linear = math.hypot(ddx, ddy)
+
+        log.debug("Vision pass %d (rot): dx=%.3f dy=%.3f drot=%.1f linear=%.3f",
+                  passes_used, ddx, ddy, ddrot, linear)
+
+        if not self.vision_apply:
+            log.info("Vision apply disabled — skipping corrections")
+            return 0.0, 0.0, 0.0, passes_used
+
+        total_drot += ddrot
+
+        # Limit checks
+        if linear > v.max_linear_offset_mm:
+            raise VisionError(f"Linear offset {linear:.2f}mm exceeds max {v.max_linear_offset_mm}mm")
+        if abs(ddrot) > v.max_angular_offset_deg:
+            raise VisionError(f"Angular offset {ddrot:.1f}deg exceeds max {v.max_angular_offset_deg}deg")
+
+        # Already converged on all axes — use these XY values since no
+        # rotation will be applied (no swing, so XY is still valid).
+        if linear < self._converge_mm and abs(ddrot) < self._converge_deg:
+            total_dx += ddx
+            total_dy += ddy
+            log.info("Vision converged in %d pass(es)", passes_used)
+            return total_dx, total_dy, total_drot, passes_used
+
+        # Apply rotation only — do NOT move XY.  The XY offset measured
+        # with the part still rotated will be stale after this correction.
+        cur = self._motion.get_position()
+        self._motion.move_to(e=cur["E"] - ddrot)
+
+        # ── Phase 2: settle, detect, fix XY + residual rotation ────
+        for _ in range(self._max_passes - 1):
+            time.sleep(settle_s)
             result = self._vision.detect_part(body_w, body_h, part_id=part_id)
+            passes_used += 1
             ddx, ddy, ddrot = result.dx_mm, result.dy_mm, result.drot_deg
-
+            ddrot = self._clamp_yaw(ddrot, yaw_max, yaw_snap, part_id)
             linear = math.hypot(ddx, ddy)
-            log.debug("Vision pass %d: dx=%.3f dy=%.3f drot=%.1f linear=%.3f",
-                      pass_num + 1, ddx, ddy, ddrot, linear)
+
+            log.debug("Vision pass %d (xy): dx=%.3f dy=%.3f drot=%.1f linear=%.3f",
+                      passes_used, ddx, ddy, ddrot, linear)
 
             total_dx += ddx
             total_dy += ddy
             total_drot += ddrot
 
-            # Check convergence
             if linear < self._converge_mm and abs(ddrot) < self._converge_deg:
-                log.info("Vision converged in %d pass(es)", pass_num + 1)
-                return total_dx, total_dy, total_drot, pass_num + 1
+                log.info("Vision converged in %d pass(es)", passes_used)
+                return total_dx, total_dy, total_drot, passes_used
 
-            # Check limits
-            v = self._config.vision
             if linear > v.max_linear_offset_mm:
                 raise VisionError(f"Linear offset {linear:.2f}mm exceeds max {v.max_linear_offset_mm}mm")
             if abs(ddrot) > v.max_angular_offset_deg:
                 raise VisionError(f"Angular offset {ddrot:.1f}deg exceeds max {v.max_angular_offset_deg}deg")
 
-            # Apply correction: move nozzle to compensate
             cur = self._motion.get_position()
             self._motion.move_to(
                 x=cur["X"] - ddx,
@@ -308,8 +359,28 @@ class PnPEngine:
                 e=cur["E"] - ddrot,
             )
 
-        log.warning("Vision did not converge in %d passes", self._max_passes)
-        return total_dx, total_dy, total_drot, self._max_passes
+        log.warning("Vision did not converge in %d passes", passes_used)
+        return total_dx, total_dy, total_drot, passes_used
+
+    @staticmethod
+    def _clamp_yaw(drot: float, yaw_max: float, yaw_snap: float, part_id: str) -> float:
+        """Apply per-part yaw policy.
+
+        yaw_snap > 0 (square ICs like QFN): snap to nearest multiple.
+            e.g. snap=45 → detected 30° snaps to 45°, detected 10° snaps to 0°.
+        yaw_snap == 0 (rectangular ICs): ignore if |drot| > yaw_max.
+        """
+        if yaw_snap > 0:
+            snapped = round(drot / yaw_snap) * yaw_snap
+            if abs(snapped - drot) > 0.1:
+                log.info("Yaw %.1f° snapped to %.1f° for %s (snap=%g°)",
+                         drot, snapped, part_id, yaw_snap)
+            return snapped
+        if abs(drot) > yaw_max:
+            log.warning("Yaw %.1f° exceeds ±%.1f° for %s — ignoring",
+                        drot, yaw_max, part_id)
+            return 0.0
+        return drot
 
     def _discard(self) -> None:
         """Move to discard location and release part."""

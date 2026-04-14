@@ -133,16 +133,43 @@ LABELS = {
 
 # ── Static plot ───────────────────────────────────────────────
 
+def _data_bounds(moves: list[GMove], config=None, pad: float = 5.0):
+    """Compute axis limits from data + config, with padding."""
+    if not moves:
+        return (-5, 140), (-5, 180), (-2, 28)
+
+    xs = [m.x0 for m in moves] + [m.x1 for m in moves]
+    ys = [m.y0 for m in moves] + [m.y1 for m in moves]
+    zs = [m.z0 for m in moves] + [m.z1 for m in moves]
+
+    # Include config bounds if available
+    if config:
+        xs += [0, config.machine.axis_limits.x.max]
+        ys += [0, config.machine.axis_limits.y.max]
+        for p in config.placements:
+            xs.append(p.x); ys.append(p.y)
+        for f in config.feeders.values():
+            if f.enabled:
+                xs += [f.ref_hole.x, f.last_hole.x]
+                ys += [f.ref_hole.y, f.last_hole.y]
+                zs += [f.ref_hole.z]
+
+    x_lim = (min(xs) - pad, max(xs) + pad)
+    y_lim = (min(ys) - pad, max(ys) + pad)
+    z_lim = (min(zs) - 2, max(zs) + 2)
+    return x_lim, y_lim, z_lim
+
+
 def plot_gcode(moves: list[GMove], title: str = "G-code Toolpath",
-               show_legend: bool = True, ax: plt.Axes | None = None) -> plt.Figure:
-    """Render the toolpath as 2D XY view + Z profile + speed profile."""
+               show_legend: bool = True, ax: plt.Axes | None = None,
+               config=None) -> plt.Figure:
+    """Render the toolpath as a clean 2D XY view."""
     if ax is None:
-        fig, (ax, ax_z, ax_f) = plt.subplots(3, 1, figsize=(10, 12),
-                                              gridspec_kw={"height_ratios": [3, 1, 1]})
+        fig, ax = plt.subplots(1, 1, figsize=(12, 8))
     else:
         fig = ax.figure
-        ax_z = None
-        ax_f = None
+
+    x_lim, y_lim, _ = _data_bounds(moves, config)
 
     ax.set_facecolor("#f8fafc")
     ax.set_xlabel("X (mm)")
@@ -152,7 +179,9 @@ def plot_gcode(moves: list[GMove], title: str = "G-code Toolpath",
     ax.grid(True, alpha=0.3, linestyle="--")
 
     # Draw machine bounds (faded)
-    ax.add_patch(patches.Rectangle((0, 0), 130, 170, linewidth=1,
+    mx = config.machine.axis_limits.x.max if config else 130
+    my = config.machine.axis_limits.y.max if config else 170
+    ax.add_patch(patches.Rectangle((0, 0), mx, my, linewidth=1,
                                     edgecolor="#d1d5db", facecolor="none", linestyle="--"))
 
     # Collect lines by type for legend
@@ -217,47 +246,16 @@ def plot_gcode(moves: list[GMove], title: str = "G-code Toolpath",
         if legend_handles:
             ax.legend(handles=legend_handles, loc="upper right", fontsize=8, framealpha=0.9)
 
-    ax.set_xlim(-5, 140)
-    ax.set_ylim(-5, 180)
+    ax.set_xlim(*x_lim)
+    ax.set_ylim(*y_lim)
 
-    # ── Z profile (height over steps) ──
-    if ax_z is not None:
-        steps = list(range(len(moves)))
-        z_vals = [m.z1 for m in moves]
-        z_colors = [COLORS.get(m.move_type, COLORS["other"]) for m in moves]
-
-        for i in range(len(moves)):
-            if i > 0:
-                ax_z.plot([steps[i - 1], steps[i]], [z_vals[i - 1], z_vals[i]],
-                          color=z_colors[i], linewidth=1.5, alpha=0.8)
-            ax_z.plot(steps[i], z_vals[i], "o", color=z_colors[i], markersize=3, zorder=4)
-
-        # Mark vacuum events
-        for i, m in enumerate(moves):
-            if m.move_type == "vacuum_on":
-                ax_z.axvline(i, color=COLORS["vacuum_on"], alpha=0.4, linewidth=1, linestyle="--")
-                ax_z.text(i, max(z_vals) * 0.9, "V", fontsize=7, color=COLORS["vacuum_on"], ha="center")
-            elif m.move_type == "vacuum_off":
-                ax_z.axvline(i, color=COLORS["vacuum_off"], alpha=0.4, linewidth=1, linestyle="--")
-
-        ax_z.set_facecolor("#f8fafc")
-        ax_z.set_xlabel("Step")
-        ax_z.set_ylabel("Z (mm)")
-        ax_z.set_title("Z Height Profile", fontsize=10)
-        ax_z.grid(True, alpha=0.3, linestyle="--")
-        ax_z.invert_yaxis()  # 0=top (safe), higher=lower (physical convention)
-
-    # ── Speed profile (feedrate over steps) ──
-    if ax_f is not None:
-        f_vals = [m.feedrate for m in moves]
-        f_colors = [COLORS.get(m.move_type, COLORS["other"]) for m in moves]
-
-        ax_f.bar(range(len(moves)), f_vals, color=f_colors, width=0.8, alpha=0.7)
-        ax_f.set_facecolor("#f8fafc")
-        ax_f.set_xlabel("Step")
-        ax_f.set_ylabel("Feedrate (mm/min)")
-        ax_f.set_title("Speed Profile", fontsize=10)
-        ax_f.grid(True, alpha=0.3, linestyle="--", axis="y")
+    # Draw placement labels from config
+    if config:
+        for p in config.placements:
+            if p.enabled:
+                ax.plot(p.x, p.y, "s", color="#22c55e", markersize=6, zorder=6, alpha=0.7)
+                ax.annotate(p.ref, (p.x, p.y), textcoords="offset points",
+                            xytext=(5, 5), fontsize=7, color="#22c55e", alpha=0.8)
 
     return fig
 
@@ -265,9 +263,13 @@ def plot_gcode(moves: list[GMove], title: str = "G-code Toolpath",
 # ── Animated playback ─────────────────────────────────────────
 
 def animate_gcode(moves: list[GMove], title: str = "G-code Playback",
-                  interval_ms: int = 200) -> None:
+                  interval_ms: int = 200, config=None) -> None:
     """Animate the toolpath step by step."""
     from matplotlib.animation import FuncAnimation
+
+    x_lim, y_lim, _ = _data_bounds(moves, config)
+    mx = config.machine.axis_limits.x.max if config else 130
+    my = config.machine.axis_limits.y.max if config else 170
 
     fig, ax = plt.subplots(1, 1, figsize=(10, 8))
     ax.set_facecolor("#f8fafc")
@@ -276,10 +278,10 @@ def animate_gcode(moves: list[GMove], title: str = "G-code Playback",
     ax.set_title(title)
     ax.set_aspect("equal")
     ax.grid(True, alpha=0.3, linestyle="--")
-    ax.add_patch(patches.Rectangle((0, 0), 130, 170, linewidth=1,
+    ax.add_patch(patches.Rectangle((0, 0), mx, my, linewidth=1,
                                     edgecolor="#d1d5db", facecolor="none", linestyle="--"))
-    ax.set_xlim(-5, 140)
-    ax.set_ylim(-5, 180)
+    ax.set_xlim(*x_lim)
+    ax.set_ylim(*y_lim)
 
     # Nozzle marker
     nozzle, = ax.plot(0, 0, "o", color="#dc2626", markersize=10, zorder=10)
@@ -378,12 +380,18 @@ def _draw_3d_scene(ax, config=None):
     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
     # Machine base plate outline
-    bx, by = 130, 170
+    bx = config.machine.axis_limits.x.max if config else 130
+    by = config.machine.axis_limits.y.max if config else 170
     for x0, y0, x1, y1 in [(0, 0, bx, 0), (bx, 0, bx, by), (bx, by, 0, by), (0, by, 0, 0)]:
         ax.plot([x0, x1], [y0, y1], [0, 0], color="#d1d5db", linewidth=0.8, alpha=0.5)
 
     # Z reference planes (dashed lines at key heights)
-    for z, label, color in [(0, "Safe Z=0", "#9ca3af"), (16, "Board Z=16", "#86efac"), (23, "Pick Z=23", "#fca5a5")]:
+    safe_z = config.z_heights.safe if config else 0
+    board_z = config.z_heights.board_surface if config else 16
+    pick_z = config.z_heights.feeder_pick if config else 23
+    for z, label, color in [(safe_z, f"Safe Z={safe_z}", "#9ca3af"),
+                            (board_z, f"Board Z={board_z}", "#86efac"),
+                            (pick_z, f"Pick Z={pick_z}", "#fca5a5")]:
         for x0, y0, x1, y1 in [(0, 0, bx, 0), (0, by, bx, by)]:
             ax.plot([x0, x1], [y0, y1], [z, z], color=color, linewidth=0.5, alpha=0.3, linestyle="--")
         ax.text(bx + 2, 0, z, label, fontsize=6, color=color, alpha=0.7)
@@ -410,12 +418,13 @@ def _draw_3d_scene(ax, config=None):
         # IC slots (tick marks along tape direction)
         dx = f.last_hole.x - f.ref_hole.x
         dy = f.last_hole.y - f.ref_hole.y
-        length = max(0.01, (dx**2 + dy**2)**0.5)
-        ux, uy = dx / length, dy / length
-        for i in range(10):  # show 10 IC positions
-            sx = fx + i * f.pitch * ux
-            sy = fy + i * f.pitch * uy
-            ax.plot([sx - 1, sx + 1], [sy, sy], [fz, fz], color="#ea580c", linewidth=1, alpha=0.5)
+        length = (dx**2 + dy**2)**0.5
+        if length > 0.01 and f.pitch > 0.01:
+            ux, uy = dx / length, dy / length
+            for i in range(min(10, f.max_count or 10)):
+                sx = fx + i * f.pitch * ux
+                sy = fy + i * f.pitch * uy
+                ax.plot([sx - 1, sx + 1], [sy, sy], [fz, fz], color="#ea580c", linewidth=1, alpha=0.5)
 
     # Camera position
     cam = config.camera.position
@@ -484,14 +493,15 @@ def plot_gcode_3d(moves: list[GMove], config=None, title: str = "3D Toolpath",
         ax.plot([m.x0, m.x1], [m.y0, m.y1], [m.z0, m.z1],
                 color=color, linewidth=lw, alpha=alpha)
 
+    x_lim, y_lim, z_lim = _data_bounds(moves, config)
     ax.set_xlabel("X (mm)")
     ax.set_ylabel("Y (mm)")
     ax.set_zlabel("Z (mm)")
     ax.set_title(title)
-    ax.set_xlim(-5, 140)
-    ax.set_ylim(-5, 180)
-    ax.set_zlim(-2, 28)
-    ax.invert_zaxis()  # 0=top, 23=bottom (physical convention)
+    ax.set_xlim(*x_lim)
+    ax.set_ylim(*y_lim)
+    ax.set_zlim(*z_lim)
+    ax.invert_zaxis()  # 0=top, higher=lower (physical convention)
     ax.view_init(elev=25, azim=-50)
 
     if save_path:
@@ -507,6 +517,7 @@ def animate_gcode_3d(moves: list[GMove], config=None, title: str = "3D Toolpath"
 
     frames_data = _expand_frames(moves, base_ms=50, speed_scale=speed_scale)
 
+    x_lim, y_lim, z_lim = _data_bounds(moves, config)
     fig = plt.figure(figsize=(12, 9))
     ax = fig.add_subplot(111, projection="3d")
     _draw_3d_scene(ax, config)
@@ -515,9 +526,9 @@ def animate_gcode_3d(moves: list[GMove], config=None, title: str = "3D Toolpath"
     ax.set_ylabel("Y (mm)")
     ax.set_zlabel("Z (mm)")
     ax.set_title(title)
-    ax.set_xlim(-5, 140)
-    ax.set_ylim(-5, 180)
-    ax.set_zlim(-2, 28)
+    ax.set_xlim(*x_lim)
+    ax.set_ylim(*y_lim)
+    ax.set_zlim(*z_lim)
     ax.invert_zaxis()
 
     # Nozzle marker
@@ -597,7 +608,6 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="G-code toolpath visualizer")
     parser.add_argument("file", help="G-code file to visualize")
-    parser.add_argument("--3d", dest="three_d", action="store_true", help="3D visualization")
     parser.add_argument("--animate", action="store_true", help="Animate step-by-step")
     parser.add_argument("--speed", type=float, default=0.3, help="Animation speed scale (0.1=fast, 1.0=realtime)")
     parser.add_argument("--save", help="Save plot to image file")
@@ -608,11 +618,16 @@ def main():
     text = open(args.file).read()
     moves = parse_gcode(text)
 
-    # Load config for 3D scene elements
+    # Load config for scene elements and axis scaling
     config = None
-    if args.config:
+    config_path = args.config
+    if not config_path:
+        import os
+        if os.path.exists("config.json"):
+            config_path = "config.json"
+    if config_path:
         from nanopnp.config import load_config
-        config = load_config(args.config)
+        config = load_config(config_path)
 
     if args.stats or not args.animate:
         stats = summarize(moves)
@@ -629,24 +644,12 @@ def main():
             print(f"  WARNING: diagonal Z+XY moves detected!")
         print()
 
-    if args.three_d:
-        if args.animate:
-            animate_gcode_3d(moves, config=config, title=f"3D: {args.file}", speed_scale=args.speed)
-        else:
-            fig = plot_gcode_3d(moves, config=config, title=f"3D: {args.file}", save_path=args.save)
-            if not args.save:
-                plt.show()
+    if args.animate:
+        animate_gcode_3d(moves, config=config, title=f"3D: {args.file}", speed_scale=args.speed)
     else:
-        if args.animate:
-            animate_gcode(moves, title=f"Toolpath: {args.file}", interval_ms=int(args.speed * 1000))
-        else:
-            fig = plot_gcode(moves, title=f"Toolpath: {args.file}")
-            if args.save:
-                fig.savefig(args.save, dpi=150, bbox_inches="tight")
-                print(f"Saved to {args.save}")
-            else:
-                plt.tight_layout()
-                plt.show()
+        fig = plot_gcode_3d(moves, config=config, title=f"3D: {args.file}", save_path=args.save)
+        if not args.save:
+            plt.show()
 
 
 if __name__ == "__main__":

@@ -141,6 +141,7 @@ class NanoPnPGUI:
         self._dry_run_var = tk.BooleanVar(value=False)
         self._tool_var = tk.IntVar(value=0)
         self._vision_enabled_var = tk.BooleanVar(value=False)
+        self._vision_apply_var = tk.BooleanVar(value=True)
 
         self._build_layout()
         self._bind_keys()
@@ -388,6 +389,7 @@ class NanoPnPGUI:
         ttk.Separator(cr, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6)
         ttk.Button(cr, text="STOP", style="Red.TButton", command=self._on_stop_job).pack(side=tk.LEFT, padx=3)
         ttk.Checkbutton(cr, text="Vision", variable=self._vision_enabled_var).pack(side=tk.LEFT, padx=6)
+        ttk.Checkbutton(cr, text="Apply", variable=self._vision_apply_var).pack(side=tk.LEFT, padx=2)
         self._progress_var = tk.DoubleVar(value=0)
         ttk.Progressbar(cr, variable=self._progress_var, maximum=100, length=200).pack(side=tk.LEFT, padx=6)
         self._progress_label = ttk.Label(cr, text="Idle", foreground=FG_DIM)
@@ -395,7 +397,7 @@ class NanoPnPGUI:
 
         # Results table
         res_f = ttk.LabelFrame(tab, text="Results")
-        res_f.grid(row=2, column=0, sticky="nsew", padx=4, pady=(2, 4))
+        res_f.grid(row=3, column=0, sticky="nsew", padx=4, pady=(2, 4))
         rcols = ("ref", "part", "nominal", "corrected", "dx", "dy", "drot", "status")
         self._result_tree = ttk.Treeview(res_f, columns=rcols, show="headings", height=6)
         for c, w in zip(rcols, (50, 80, 100, 100, 55, 55, 55, 70)):
@@ -825,6 +827,7 @@ class NanoPnPGUI:
                 self._paste = PasteDispenser(self._motion, self._config)
                 self._engine = PnPEngine(self._config, self._motion, self._feeders,
                                             vision_enabled=self._vision_enabled_var.get())
+                self._engine.vision_apply = self._vision_apply_var.get()
                 # Persist last successful connection for auto-reconnect next launch
                 if not dry_run:
                     self._save_last_connection(port, baud)
@@ -962,6 +965,7 @@ class NanoPnPGUI:
                     self._polling = False  # pause position polling during job
                     is_full_job = isinstance(item, tuple)
                     self._engine.vision_enabled = self._vision_enabled_var.get()
+                    self._engine.vision_apply = self._vision_apply_var.get()
                     placements = self._config.enabled_placements()
                     self._result_queue.put(("job_status", "Running..."))
 
@@ -1248,20 +1252,18 @@ class NanoPnPGUI:
 
     def _do_save(self):
         self._save_timer = None
-        # Route based on source of truth:
-        #   - .pos loaded  → write the .pos file in place (round-trip)
-        #   - otherwise    → write config.json (legacy behavior)
+        # Always write config.json (machine settings, feeders, placements).
+        cfg = self._config
+        path = self._config_path
+        def _bg_save():
+            try:
+                save_config(cfg, path)
+            except Exception as e:
+                self._result_queue.put(("console_err", f"Save config failed: {e}"))
+        threading.Thread(target=_bg_save, daemon=True).start()
+        # If a .pos file is loaded, also write placements back to it.
         if self._pos_source is not None:
             self._save_pos_source()
-        else:
-            cfg = self._config
-            path = self._config_path
-            def _bg_save():
-                try:
-                    save_config(cfg, path)
-                except Exception as e:
-                    self._result_queue.put(("console_err", f"Save failed: {e}"))
-            threading.Thread(target=_bg_save, daemon=True).start()
 
     # ── Target selector (Local ↔ Jetson) ─────────────────────
 
@@ -1696,9 +1698,9 @@ class NanoPnPGUI:
             ("Last Hole X", "lh_x", f.last_hole.x),
             ("Last Hole Y", "lh_y", f.last_hole.y),
             ("Last Hole Z", "lh_z", f.last_hole.z),
-            ("Pitch", "pitch", f.pitch),
             ("Tape Width", "tape_w", f.tape_width),
             ("Rotation", "rot", f.rotation),
+            ("Max Count", "max_count", f.max_count),
             ("Enabled", "enabled", f.enabled),
         ]
         vars_ = {}
@@ -1721,9 +1723,9 @@ class NanoPnPGUI:
                 f.last_hole.x = float(vars_["lh_x"].get())
                 f.last_hole.y = float(vars_["lh_y"].get())
                 f.last_hole.z = float(vars_["lh_z"].get())
-                f.pitch = float(vars_["pitch"].get())
                 f.tape_width = float(vars_["tape_w"].get())
                 f.rotation = float(vars_["rot"].get())
+                f.max_count = int(vars_["max_count"].get())
                 f.enabled = vars_["enabled"].get()
             except ValueError as e:
                 messagebox.showerror("Error", str(e), parent=dlg)
