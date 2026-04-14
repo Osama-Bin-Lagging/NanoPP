@@ -31,7 +31,7 @@ class JobInputs:
 
     @property
     def can_paste(self) -> bool:
-        return self.edge_cuts is not None and self.paste is not None
+        return self.paste is not None
 
     @property
     def can_place(self) -> bool:

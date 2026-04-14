@@ -11,7 +11,7 @@ OpenPnP's NullMotionPlanner merges Z and XY into diagonal G1 commands, dragging 
 - **Safe motion**: Z retracts before XY travel, always. Never diagonal.
 - **Solder paste dispensing**: Draws paste lines for SOIC8, SOT-23-6, LQFN16 packages via E1 extruder
 - **Pick and place**: Vacuum pick from tape feeders, bottom vision alignment, corrected placement
-- **Bottom vision**: OpenCV pipeline (grayscale threshold → contour → density clustering → MinAreaRect) with per-part area filters
+- **Bottom vision**: Per-part OpenCV pipelines — blob detection for QFN/SOT, multi-pad threshold for SOIC8 — with density clustering and MinAreaRect
 - **GUI**: Tkinter interface with jog controls, camera preview, config editing, job file pickers, local/remote target selector
 - **CLI**: Headless operation via `run.py` commands
 - **G-code export**: Save job output to file without connecting to hardware
@@ -25,7 +25,7 @@ OpenPnP's NullMotionPlanner merges Z and XY into diagonal G1 commands, dragging 
 
 - MKS Gen L V2.1 (ATmega2560)
 - Marlin 2.1.2.7
-- Serial @ 250000 baud
+- Serial @ 250000 baud (auto-retry on connect, up to 5 attempts)
 - Juki vacuum nozzle on E0 (rotation via M82 absolute)
 - Solder paste dispenser on E1 (via M83 relative)
 - USB bottom camera
@@ -112,14 +112,14 @@ Flip the MANUAL switch to take over the machine — any running NanoPnP process 
 
 All parameters are in `config.json` and editable from the GUI's Setup tab:
 
-- **Machine**: serial port, feedrate (XY: 1000, Z: 500), axis limits
-- **Z heights**: safe (0), retract (30), board (16), feeder (23), discard (23)
+- **Machine**: serial port, feedrate (XY: 1000, Z: 1000), axis limits
+- **Z heights**: safe (0), retract (30), board surface (18), feeder pick (23), discard (23)
 - **Paste dispensing**: feedrates (XY, Z, E), extrusion rate, prime/retract amounts, travel Z
-- **Feeders**: position, pitch, tape direction, feed count tracking
-- **Parts**: SOIC8/SOT236/LQFN16 with heights and pad layouts
-- **Board**: origin, first pad offset, package map (.pos package names → feeder part IDs), skip prefixes (FID, TP, MH, H)
-- **Vision**: grayscale threshold, per-part area limits, mask diameter, convergence tolerance
-- **Camera**: device index, position, units-per-pixel (calibrate via GUI)
+- **Feeders**: position, pitch, tape direction, feed count tracking, max count
+- **Parts**: SOIC8/SOT236/LQFN16 with heights, pad layouts, yaw limits
+- **Board**: origin, place Z, package map (.pos package names -> feeder part IDs), skip prefixes
+- **Vision**: threshold, per-part area limits, mask diameter, convergence tolerance, max passes
+- **Camera**: device index, position offset, units-per-pixel
 - **Controller** (optional): joystick port, baud, deadzone, step sizes, feedrates for manual mode
 - **Remote** (optional): SSH host, user, key, incoming/status paths for Jetson target
 
@@ -136,30 +136,60 @@ nanopnp/
   board_parser.py        KiCad Gerber/.pos parser (uses gerbonara)
   paste_dispenser.py     Solder paste line generation for 3 package types
   feeder.py              Tape feeder position calculation + state persistence
-  vision.py              OpenCV bottom vision pipeline + UPP calibration
+  vision.py              OpenCV bottom vision — per-part pipelines + UPP calibration
   pnp_engine.py          Pick-align-place orchestrator with retry + drift tracking
   gui.py                 Tkinter GUI (light theme, cross-platform)
-  job_inputs.py          Job file classification (Edge_Cuts, F_Paste, .pos → mode)
+  job_inputs.py          Job file classification (Edge_Cuts, F_Paste, .pos -> mode)
   remote.py              SCP job upload + SSH status polling for Jetson targets
   manual_control.py      Joystick/button manual jog via external controller
   visualizer.py          G-code path plotting, animation, travel stats
-  watcher.py             File-drop daemon: watch incoming/ → run job → archive
+  watcher.py             File-drop daemon: watch incoming/ -> run job -> archive
 scripts/
   install-watcher.sh     Systemd service installer for the watcher daemon
   nanopnp-watcher.service  Systemd unit template
 tune_vision.py           Vision threshold tuning across captured images
+annotate.py              3-point rotated bbox annotation tool for vision ground truth
+```
+
+## Vision Pipelines
+
+Each part type has a tuned detection strategy:
+
+| Part | Strategy | Key params |
+|------|----------|------------|
+| **SOIC-8** | Grayscale threshold, 8 pads, density clustering | thresh=190, no mask |
+| **SOT-23-6** | Grayscale threshold + center mask, 6 pads | thresh=190, 200px mask |
+| **LQFN-16** | High threshold blob detection (pads merge) | thresh=230, 250px mask |
+
+**SOIC-8**: Large gull-wing leads are bright and well-separated. Simple threshold at 190 detects individual pads, density clustering selects the 8 most tightly grouped.
+
+**SOT-23-6**: Smaller pads, same threshold approach but with a circular mask (200px radius) centered on the image to exclude metal arm reflections.
+
+**LQFN-16**: Tiny QFN pads are saturated bright (254) and merge into one large blob at threshold 230. Instead of separating individual pads, the pipeline finds the single largest bright blob near center — its MinAreaRect directly gives center, size, and angle.
+
+### Vision Tuning
+
+```bash
+# Annotate ground truth bboxes on captures
+python annotate.py capture_*.png
+
+# Test thresholds across all captures
+python tune_vision.py --part lqfn16
 ```
 
 ## Pick-and-Place Cycle
 
 ```
 For each enabled placement:
-  1. PICK:    safe_move to feeder → lower Z → vacuum ON → retract to Z_retract
-  2. ROTATE:  compensate for tape orientation (E axis)
-  3. ALIGN:   (if --vision) move to camera at Z_retract → detect → correct (up to 3 passes)
-  4. PLACE:   safe_move to board → lower Z to board_surface → vacuum OFF → retract
-  5. ADVANCE: increment feeder count
+  1. PICK:    safe_move to feeder -> lower Z -> vacuum ON -> retract to Z_retract
+  2. CAMERA:  safe_move to camera position (Z retracts automatically)
+  3. ROTATE:  compensate for tape orientation at camera (E axis)
+  4. ALIGN:   (if vision) two-phase: correct rotation first, then XY (up to 3 passes)
+  5. PLACE:   safe_move to board with final rotation -> lower Z -> vacuum OFF -> retract
+  6. ADVANCE: increment feeder count
 ```
+
+Nozzle rotation happens at the camera position (not at the feeder) so the part is in its placement orientation for vision alignment. The `safe_move_to` function always resets E to 0 during XY travel, so rotation is applied after arriving at each waypoint.
 
 ## Remote / Jetson Deployment
 
@@ -185,8 +215,8 @@ The bottom camera needs correct units-per-pixel values for accurate alignment:
 
 1. Place a known-size component (e.g. SOIC8 body: 3.9 x 4.9 mm) on the camera
 2. Move nozzle to camera Z = part height
-3. Camera tab → "Calibrate UPP..." → enter dimensions → Detect & Calibrate
-4. Review measured vs known → Apply → saves to config
+3. Camera tab -> "Calibrate UPP..." -> enter dimensions -> Detect & Calibrate
+4. Review measured vs known -> Apply -> saves to config
 
 ## License
 

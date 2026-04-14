@@ -108,6 +108,32 @@ class VisionSystem:
     def __exit__(self, *exc):
         self.close()
 
+    # ── Nozzle detection ─────────────────────────────────────
+
+    @staticmethod
+    def _find_nozzle_center(gray: np.ndarray) -> tuple[int, int]:
+        """Find the center of the bright circular nozzle opening.
+
+        Falls back to image center if no large bright region is found.
+        """
+        h, w = gray.shape
+        _, bright = cv2.threshold(gray, 80, 255, cv2.THRESH_BINARY)
+        contours, _ = cv2.findContours(bright, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        best_center = (w // 2, h // 2)
+        best_dist = 9999.0
+        for c in contours:
+            if cv2.contourArea(c) < 10000:
+                continue
+            M = cv2.moments(c)
+            if M["m00"] > 0:
+                cx = int(M["m10"] / M["m00"])
+                cy = int(M["m01"] / M["m00"])
+                dist = np.sqrt((cx - w / 2) ** 2 + (cy - h / 2) ** 2)
+                if dist < best_dist and dist < 200:
+                    best_dist = dist
+                    best_center = (cx, cy)
+        return best_center
+
     # ── Pattern matching ────────────────────────────────────
 
     @staticmethod
@@ -232,15 +258,15 @@ class VisionSystem:
             max_area_px = 6000
             use_clahe = False
         elif part_id == "IC_SOT236":
-            threshold = 230               # post-CLAHE threshold
-            min_area_px = 200
-            max_area_px = 8000
-            use_clahe = True
+            threshold = v.threshold       # 190, same as SOIC8
+            min_area_px = 500
+            max_area_px = 6000
+            use_clahe = False
         elif part_id == "IC_LQFN16":
-            threshold = 230
-            min_area_px = 200
-            max_area_px = 8000
-            use_clahe = True
+            threshold = -2               # sentinel: blob detection mode
+            min_area_px = 2000           # QFN merges into one large blob
+            max_area_px = 50000
+            use_clahe = False
         else:
             threshold = v.threshold
             min_area_px = 80
@@ -250,27 +276,48 @@ class VisionSystem:
         # 1-2. Gray + preprocessing
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        if use_clahe:
-            # Circular mask to crop to nozzle area, then CLAHE to
-            # boost local contrast so pads pop out from IC body.
+        if threshold == -2:
+            # Blob detection path (LQFN16): QFN pads are saturated bright
+            # and merge into one large blob at high threshold. Find the
+            # largest blob near center — its minAreaRect gives the part bbox.
+            mask = np.zeros((h, w), dtype=np.uint8)
+            cv2.circle(mask, (w // 2, h // 2), 250, 255, -1)
+            masked = cv2.bitwise_and(gray, gray, mask=mask)
+            blurred = cv2.GaussianBlur(masked, (5, 5), 0)
+            _, binary = cv2.threshold(blurred, 230, 255, cv2.THRESH_BINARY)
+            kernel = np.ones((3, 3), np.uint8)
+            cleaned = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
+        elif use_clahe:
+            # CLAHE path (SOT236): boost local contrast then global threshold.
             mask = np.zeros((h, w), dtype=np.uint8)
             cv2.circle(mask, (w // 2, h // 2), v.mask_diameter // 2, 255, -1)
             gray = cv2.bitwise_and(gray, gray, mask=mask)
             clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
             gray = clahe.apply(gray)
-
-        k = v.blur_kernel
-        if k % 2 == 0:
-            k += 1
-        blurred = cv2.GaussianBlur(gray, (k, k), 0)
-
-        # 3. Threshold — isolate bright regions (pads)
-        _, binary = cv2.threshold(blurred, threshold, 255, cv2.THRESH_BINARY)
-
-        # 4. Morphological opening to remove noise specks
-        kernel = np.ones((3, 3), np.uint8)
-        morph_iters = 2 if use_clahe else 1
-        cleaned = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=morph_iters)
+            k = v.blur_kernel if v.blur_kernel % 2 == 1 else v.blur_kernel + 1
+            blurred = cv2.GaussianBlur(gray, (k, k), 0)
+            _, binary = cv2.threshold(blurred, threshold, 255, cv2.THRESH_BINARY)
+            kernel = np.ones((3, 3), np.uint8)
+            cleaned = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=2)
+        elif part_id == "IC_SOT236":
+            # SOT236: same threshold as SOIC8 but with tight center mask.
+            # SOT is small — 200px radius covers the pads while excluding
+            # nozzle surface noise.
+            mask = np.zeros((h, w), dtype=np.uint8)
+            cv2.circle(mask, (w // 2, h // 2), 200, 255, -1)
+            gray = cv2.bitwise_and(gray, gray, mask=mask)
+            k = v.blur_kernel if v.blur_kernel % 2 == 1 else v.blur_kernel + 1
+            blurred = cv2.GaussianBlur(gray, (k, k), 0)
+            _, binary = cv2.threshold(blurred, threshold, 255, cv2.THRESH_BINARY)
+            kernel = np.ones((3, 3), np.uint8)
+            cleaned = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
+        else:
+            # Standard path (SOIC8): simple grayscale threshold, no mask.
+            k = v.blur_kernel if v.blur_kernel % 2 == 1 else v.blur_kernel + 1
+            blurred = cv2.GaussianBlur(gray, (k, k), 0)
+            _, binary = cv2.threshold(blurred, threshold, 255, cv2.THRESH_BINARY)
+            kernel = np.ones((3, 3), np.uint8)
+            cleaned = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
 
         # 5. FindContours (external) — much faster and avoids hierarchy issues
         contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -286,40 +333,59 @@ class VisionSystem:
                         part_id or "stock", threshold, min_area_px, max_area_px)
             return VisionResult(dx_mm=0, dy_mm=0, drot_deg=0, confidence=0, frame=debug)
 
-        # Reject if too few contours (need at least 4 pads for a meaningful rect)
-        if len(filtered) < 4:
-            log.warning("detect_part [%s]: only %d pads found, need ≥4",
-                        part_id or "stock", len(filtered))
-            return VisionResult(dx_mm=0, dy_mm=0, drot_deg=0, confidence=0, frame=debug)
-
-        # Compute centroids for all candidate contours
-        centroids = []
-        for c in filtered:
-            M = cv2.moments(c)
-            if M["m00"] > 0:
-                cx = M["m10"] / M["m00"]
-                cy = M["m01"] / M["m00"]
-                centroids.append((cx, cy, c))
-
-        if len(centroids) < 4:
-            log.warning("detect_part [%s]: too few valid centroids", part_id or "stock")
-            return VisionResult(dx_mm=0, dy_mm=0, drot_deg=0, confidence=0, frame=debug)
-
-        # Pattern-match: for SOIC8 we know there should be exactly 8 pads
-        # arranged as two parallel rows of 4. For SOT236: 2 rows of 3. For LQFN16:
-        # 4 rows of 4. Pick the subset that best matches the expected count+layout.
-        expected_count = {"IC_SOIC8": 8, "IC_SOT236": 6, "IC_LQFN16": 16}.get(part_id, 0)
-
-        if expected_count > 0 and len(centroids) > expected_count:
-            filtered = self._match_pad_pattern(centroids, expected_count)
-            log.info("detect_part [%s]: matched %d-pad pattern (from %d candidates)",
-                     part_id, expected_count, len(centroids))
-        elif expected_count > 0 and len(centroids) < expected_count:
-            log.warning("detect_part [%s]: found only %d candidates, expected %d",
-                        part_id, len(centroids), expected_count)
-            filtered = [c[2] for c in centroids]
+        # LQFN16 blob mode: pick the single largest blob near nozzle center.
+        # At high threshold, QFN pads merge into one bright blob whose
+        # minAreaRect directly gives center, size, and angle.
+        if threshold == -2:
+            best_c = None
+            best_area = 0
+            for c in filtered:
+                a = cv2.contourArea(c)
+                M = cv2.moments(c)
+                if M["m00"] > 0:
+                    cx = M["m10"] / M["m00"]
+                    cy = M["m01"] / M["m00"]
+                    d = np.sqrt((cx - w / 2) ** 2 + (cy - h / 2) ** 2)
+                    if d < 250 and a > best_area:
+                        best_area = a
+                        best_c = c
+            if best_c is None:
+                log.warning("detect_part [%s]: no large blob near nozzle center",
+                            part_id or "stock")
+                return VisionResult(dx_mm=0, dy_mm=0, drot_deg=0, confidence=0, frame=debug)
+            filtered = [best_c]
+            log.info("detect_part [%s]: blob mode — area=%d", part_id, best_area)
         else:
-            filtered = [c[2] for c in centroids]
+            # Multi-pad mode (SOIC8, SOT236): need at least 4 separate pads
+            if len(filtered) < 4:
+                log.warning("detect_part [%s]: only %d pads found, need ≥4",
+                            part_id or "stock", len(filtered))
+                return VisionResult(dx_mm=0, dy_mm=0, drot_deg=0, confidence=0, frame=debug)
+
+            centroids = []
+            for c in filtered:
+                M = cv2.moments(c)
+                if M["m00"] > 0:
+                    cx = M["m10"] / M["m00"]
+                    cy = M["m01"] / M["m00"]
+                    centroids.append((cx, cy, c))
+
+            if len(centroids) < 4:
+                log.warning("detect_part [%s]: too few valid centroids", part_id or "stock")
+                return VisionResult(dx_mm=0, dy_mm=0, drot_deg=0, confidence=0, frame=debug)
+
+            expected_count = {"IC_SOIC8": 8, "IC_SOT236": 6}.get(part_id, 0)
+
+            if expected_count > 0 and len(centroids) > expected_count:
+                filtered = self._match_pad_pattern(centroids, expected_count)
+                log.info("detect_part [%s]: matched %d-pad pattern (from %d candidates)",
+                         part_id, expected_count, len(centroids))
+            elif expected_count > 0 and len(centroids) < expected_count:
+                log.warning("detect_part [%s]: found only %d candidates, expected %d",
+                            part_id, len(centroids), expected_count)
+                filtered = [c[2] for c in centroids]
+            else:
+                filtered = [c[2] for c in centroids]
 
         # Post-match size validation: if the bbox is much bigger than the
         # expected part body, iteratively drop the contour farthest from

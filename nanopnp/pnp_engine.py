@@ -217,16 +217,13 @@ class PnPEngine:
         # ── ALIGN ──
         dx, dy, drot = 0.0, 0.0, 0.0
         vision_passes = 0
-
-        # Camera waypoint — nozzle passes through the camera XY at safe Z.
-        # safe_move_to handles the Z=30 → Z=safe retract before the XY move.
-        self._motion.safe_move_to(self._cam.x, self._cam.y)
-
-        # ── ROTATE ──
-        # Rotate at camera position (part is stationary) so rotation
-        # doesn't happen during XY travel to placement.
         nozzle_rot = p.rotation - pick_rot
-        self._motion.move_to(e=nozzle_rot, feedrate=1000)
+
+        # Camera waypoint — nozzle stays at E=0 (no pre-rotation).
+        # Vision detects the part as-picked and applies only a small
+        # residual correction.  The bulk rotation to placement angle
+        # happens during XY travel to the board.
+        self._motion.safe_move_to(self._cam.x, self._cam.y)
 
         if self.vision_enabled and self._vision is not None:
             # For alignment, drop to imaging height and run the passes.
@@ -292,9 +289,20 @@ class PnPEngine:
         settle_s = self._cam_config.settle_time_ms / 1000.0
 
         # ── Phase 1: detect and fix yaw ──
-        time.sleep(settle_s)
-        result = self._vision.detect_part(body_w, body_h, part_id=part_id)
-        passes_used += 1
+        # Retry until we get a valid detection (confidence > 0).
+        max_detect_retries = 5
+        for attempt in range(max_detect_retries):
+            time.sleep(settle_s)
+            result = self._vision.detect_part(body_w, body_h, part_id=part_id)
+            passes_used += 1
+            if result.confidence > 0:
+                break
+            log.warning("No detection on attempt %d/%d — retrying",
+                        attempt + 1, max_detect_retries)
+        else:
+            log.error("No detection after %d attempts", max_detect_retries)
+            return 0.0, 0.0, 0.0, passes_used
+
         ddx, ddy, ddrot = result.dx_mm, result.dy_mm, result.drot_deg
         ddrot = self._clamp_yaw(ddrot, yaw_max, yaw_snap, part_id)
         linear = math.hypot(ddx, ddy)
@@ -329,9 +337,15 @@ class PnPEngine:
 
         # ── Phase 2: settle, detect, fix XY + residual rotation ────
         for _ in range(self._max_passes - 1):
-            time.sleep(settle_s)
-            result = self._vision.detect_part(body_w, body_h, part_id=part_id)
-            passes_used += 1
+            # Retry until valid detection
+            for attempt in range(max_detect_retries):
+                time.sleep(settle_s)
+                result = self._vision.detect_part(body_w, body_h, part_id=part_id)
+                passes_used += 1
+                if result.confidence > 0:
+                    break
+                log.warning("No detection on attempt %d/%d — retrying",
+                            attempt + 1, max_detect_retries)
             ddx, ddy, ddrot = result.dx_mm, result.dy_mm, result.drot_deg
             ddrot = self._clamp_yaw(ddrot, yaw_max, yaw_snap, part_id)
             linear = math.hypot(ddx, ddy)
@@ -366,16 +380,18 @@ class PnPEngine:
     def _clamp_yaw(drot: float, yaw_max: float, yaw_snap: float, part_id: str) -> float:
         """Apply per-part yaw policy.
 
-        yaw_snap > 0 (square ICs like QFN): snap to nearest multiple.
-            e.g. snap=45 → detected 30° snaps to 45°, detected 10° snaps to 0°.
+        yaw_snap > 0 (square ICs like QFN): return residual after
+            snapping to nearest multiple.  Max correction = snap/2.
+            e.g. snap=45 → detected 40° → nearest 45° → residual -5°.
         yaw_snap == 0 (rectangular ICs): ignore if |drot| > yaw_max.
         """
         if yaw_snap > 0:
             snapped = round(drot / yaw_snap) * yaw_snap
-            if abs(snapped - drot) > 0.1:
-                log.info("Yaw %.1f° snapped to %.1f° for %s (snap=%g°)",
-                         drot, snapped, part_id, yaw_snap)
-            return snapped
+            residual = drot - snapped
+            if abs(snapped) > 0.1:
+                log.info("Yaw %.1f° → nearest %g° multiple = %.0f° → residual %.1f° for %s",
+                         drot, yaw_snap, snapped, residual, part_id)
+            return residual
         if abs(drot) > yaw_max:
             log.warning("Yaw %.1f° exceeds ±%.1f° for %s — ignoring",
                         drot, yaw_max, part_id)

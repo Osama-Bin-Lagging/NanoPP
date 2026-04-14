@@ -144,13 +144,11 @@ class PasteDispenser:
         self.E_PRIME = p.e_prime
         self.E_RATE = p.e_rate
         self.E_RETRACT = p.e_retract
+        self._tool_off_x = p.tool_offset_x
+        self._tool_off_y = p.tool_offset_y
         # State
         self._curr_e = 0.0
         self._primed = False
-        # Board transform: `board.origin` is now interpreted as
-        # "the machine XY where the corner-most Gerber pad should land".
-        # The per-file shift is computed inside dispense_gerber() once we
-        # know the Gerber bounding box.
         self._shift_x = 0.0
         self._shift_y = 0.0
         self._y_flip = False
@@ -181,103 +179,101 @@ class PasteDispenser:
         self,
         edge_cuts_path: str | Path,
         paste_path: str | Path,
+        refs: list[str] | None = None,
+        no_dispense: bool = False,
     ) -> int:
-        """Dispense paste using Edge_Cuts.gbr as the corner reference.
+        """Dispense paste by anchoring each component's Gerber pads around
+        its placement position from config.
 
-        Preferred entry point. Coordinate transform (one stage):
-            machine_xy = gerber_xy + BoardCorner.shift_for_machine(board.origin)
-
-        No `first_pad_offset` involved — the PCB outline defines the corner.
+        Args:
+            refs: if given, dispense only these refs (ignores enabled flag).
+                  If None, dispense all enabled placements.
         """
-        corner = parse_edge_cuts(edge_cuts_path)
         components = parse_gbr(paste_path)
         if not components:
             log.warning("No components parsed from %s", paste_path)
             return 0
 
-        bo = self._config.board.origin
-        self._shift_x, self._shift_y = corner.shift_for_machine(bo.x, bo.y)
+        # Build ref → machine position from placements
+        if refs is not None:
+            ref_set = set(refs)
+            place_map: dict[str, tuple[float, float]] = {
+                p.ref: (p.x, p.y)
+                for p in self._config.placements
+                if p.ref in ref_set
+            }
+        else:
+            place_map = {
+                p.ref: (p.x, p.y)
+                for p in self._config.placements
+                if p.enabled
+            }
 
-        log.info(
-            "[paste] board corner=(%.3f, -%.3f) w=%.1f h=%.1f  origin=(%.3f, %.3f)",
-            corner.min_x, corner.max_y_abs, corner.width, corner.height, bo.x, bo.y,
-        )
-        log.info(
-            "[paste] shift=(%+.3f, %+.3f)  first gerber pad (min_x, -max_y_abs) -> machine=(%.3f, %.3f)",
-            self._shift_x, self._shift_y,
-            corner.min_x + self._shift_x, -corner.max_y_abs + self._shift_y,
-        )
+        log.info("[paste] dispensing %d components from %s%s",
+                 len(components), Path(paste_path).name,
+                 " (NO DISPENSE)" if no_dispense else "")
+        self._no_dispense = no_dispense
+        self._init_extruder()
+        self._primed = False
+        dispensed = 0
 
-        return self._dispense_components(components, label=Path(paste_path).name)
+        for idx, (ref, pads) in enumerate(components.items(), start=1):
+            if ref not in place_map:
+                log.warning("[paste] %s: no placement in config — skipping", ref)
+                continue
+
+            # Per-component shift: center pads on placement position
+            gcx = sum(p[0] for p in pads) / len(pads)
+            gcy = sum(p[1] for p in pads) / len(pads)
+            mx, my = place_map[ref]
+            self._shift_x = mx - gcx
+            self._shift_y = my - gcy
+
+            rows = group_into_rows(pads)
+            log.info("[paste] (%d) %s — %d pads, %d row(s), center → (%.2f, %.2f)",
+                     idx, ref, len(pads), len(rows), mx, my)
+            for row_idx, row in enumerate(rows, start=1):
+                fx, fy = self._transform(*row[0])
+                lx, ly = self._transform(*row[-1])
+                log.info("[paste]   row %d: (%.2f, %.2f) → (%.2f, %.2f)",
+                         row_idx, fx, fy, lx, ly)
+                self._dispense_row(row)
+            dispensed += 1
+
+        self._finish()
+        log.info("[paste] done — %d components dispensed", dispensed)
+        return dispensed
 
     def dispense_gerber(self, gerber_path: str | Path) -> int:
-        """Legacy entry: dispense paste from a paste Gerber alone.
+        """Dispense paste from a Gerber using global min-pad anchoring.
 
-        Uses `min(pads)` + `board.first_pad_offset` as the corner reference —
-        kept for scripts/tests that haven't been migrated to `dispense_paste()`.
-        New callers should pass an Edge_Cuts path and use `dispense_paste()`
-        instead; `first_pad_offset` will be removed in a future cleanup.
+        Uses `min(pads)` + `board.first_pad_offset` as the corner reference.
+        Prefer `dispense_paste()` which anchors per-component.
         """
         components = parse_gbr(gerber_path)
         if not components:
             log.warning("No components parsed from %s", gerber_path)
             return 0
 
-        all_x: list[float] = []
-        all_y: list[float] = []
-        for pads in components.values():
-            for p in pads:
-                all_x.append(p[0])
-                all_y.append(p[1])
-        g_min_x = min(all_x)
-        g_min_y = min(all_y)
+        all_x = [p[0] for pads in components.values() for p in pads]
+        all_y = [p[1] for pads in components.values() for p in pads]
 
         fp = self._config.board.first_pad_offset
         bo = self._config.board.origin
-        self._shift_x = -g_min_x + fp.x + bo.x
-        self._shift_y = -g_min_y + fp.y + bo.y
+        self._shift_x = -min(all_x) + fp.x + bo.x
+        self._shift_y = -min(all_y) + fp.y + bo.y
 
-        log.warning(
-            "[paste] dispense_gerber() is the legacy path — no Edge_Cuts. "
-            "Using min-pad corner heuristic with first_pad_offset=(%.3f, %.3f).",
-            fp.x, fp.y,
-        )
-        log.info(
-            "[paste] gerber corner pad=(%.3f, %.3f) → machine (%.3f, %.3f)",
-            g_min_x, g_min_y,
-            g_min_x + self._shift_x, g_min_y + self._shift_y,
-        )
-        return self._dispense_components(components, label=Path(gerber_path).name)
-
-    def _dispense_components(
-        self,
-        components: dict[str, list[tuple[float, float]]],
-        label: str,
-    ) -> int:
-        """Shared dispense loop — called by both new and legacy entry points."""
-        log.info("[paste] dispensing %d components from %s", len(components), label)
+        log.info("[paste] dispense_gerber: shift=(%.3f, %.3f)", self._shift_x, self._shift_y)
 
         self._init_extruder()
         self._primed = False
         dispensed = 0
-        total = len(components)
-
-        for idx, (ref, pads) in enumerate(components.items(), start=1):
+        for ref, pads in components.items():
             rows = group_into_rows(pads)
-            log.info("[paste] (%d/%d) %s — %d pads in %d row(s)",
-                     idx, total, ref, len(pads), len(rows))
-            for row_idx, row in enumerate(rows, start=1):
-                fx, fy = self._transform(*row[0])
-                lx, ly = self._transform(*row[-1])
-                log.info(
-                    "[paste]   row %d/%d: (%.3f, %.3f) → (%.3f, %.3f)",
-                    row_idx, len(rows), fx, fy, lx, ly,
-                )
+            for row in rows:
                 self._dispense_row(row)
             dispensed += 1
-
         self._finish()
-        log.info("[paste] done — %d components dispensed", dispensed)
         return dispensed
 
     # ── Internal ───────────────────────────────────────────────
@@ -316,7 +312,13 @@ class PasteDispenser:
         s = self._motion.serial
 
         # 1. Fast travel to row start
-        s.send(f"G0 X{x0:.4f} Y{y0:.4f} F{self.FEED_XY}")
+        s.send(f"G0 X{x0:.4f} Y{y0:.4f} F1000")
+
+        if self._no_dispense:
+            # Movement only — travel to row end, pause, no extrusion
+            s.send(f"G0 X{xn:.4f} Y{yn:.4f} F1000")
+            s.send("G4 P200")
+            return
 
         # 1a. Prime the paste line on the very first row so paste is flowing
         #     before we start the across-row move.
@@ -330,18 +332,19 @@ class PasteDispenser:
         s.send(f"G1 E{self._curr_e:04.0f} F{self.FEED_PASTE}")
         s.send(f"G1 X{xn:.4f} Y{yn:.4f} F{self.FEED_XY_SLOW}")
 
-        # 3. Retract
+        # 3. Retract + dwell
         self._curr_e -= self.E_RETRACT
         s.send(f"G1 E{self._curr_e:04.0f} F{self.FEED_PASTE}")
+        s.send("G4 P200")
 
     def _finish(self) -> None:
         """Return to origin and end program (matches tried-and-tested script)."""
         s = self._motion.serial
-        s.send(f"G1 X0 Y0 F{self.FEED_XY}")
+        s.send("G1 X0 Y0 F1000")
         s.send("M30")                   # end of program
 
     def _transform(self, x: float, y: float) -> tuple[float, float]:
-        """Apply Gerber→machine shift (and optional Y-flip)."""
-        new_x = x + self._shift_x
-        new_y = (-y if self._y_flip else y) + self._shift_y
+        """Apply Gerber→machine shift, tool offset, and optional Y-flip."""
+        new_x = x + self._shift_x + self._tool_off_x
+        new_y = (-y if self._y_flip else y) + self._shift_y + self._tool_off_y
         return new_x, new_y

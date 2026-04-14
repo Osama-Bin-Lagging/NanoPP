@@ -68,23 +68,38 @@ class SerialConnection:
             return self.get_position()
 
         import serial
-        with self._lock:
-            # macOS rejects non-standard baud rates (e.g. 250000) via termios.
-            # Always open at a standard baud first, then switch via the
-            # IOSSIOSPEED ioctl which pyserial triggers when you assign .baudrate.
-            # This works reliably on both macOS and Linux.
-            is_standard = self._baud in (9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600)
-            if is_standard:
-                self._serial = serial.Serial(self._port, self._baud, timeout=5)
-            else:
-                logger.info("Non-standard baud %d — opening at 9600 then switching via IOSSIOSPEED",
-                            self._baud)
-                self._serial = serial.Serial(self._port, 9600, timeout=5)
-                self._serial.baudrate = self._baud
-            time.sleep(2)  # wait for controller boot/reset
-            # drain startup messages
-            while self._serial.in_waiting:
-                self._serial.readline()
+        max_attempts = 5
+        for attempt in range(1, max_attempts + 1):
+            try:
+                with self._lock:
+                    # macOS rejects non-standard baud rates (e.g. 250000) via termios.
+                    # Always open at a standard baud first, then switch via the
+                    # IOSSIOSPEED ioctl which pyserial triggers when you assign .baudrate.
+                    # This works reliably on both macOS and Linux.
+                    is_standard = self._baud in (9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600)
+                    if is_standard:
+                        self._serial = serial.Serial(self._port, self._baud, timeout=5)
+                    else:
+                        logger.info("Non-standard baud %d — opening at 9600 then switching via IOSSIOSPEED",
+                                    self._baud)
+                        self._serial = serial.Serial(self._port, 9600, timeout=5)
+                        self._serial.baudrate = self._baud
+                    time.sleep(2)  # wait for controller boot/reset
+                    # drain startup messages
+                    while self._serial.in_waiting:
+                        self._serial.readline()
+                break  # success
+            except (serial.SerialException, OSError) as e:
+                logger.warning("Connection attempt %d/%d failed: %s", attempt, max_attempts, e)
+                if self._serial is not None:
+                    try:
+                        self._serial.close()
+                    except Exception:
+                        pass
+                    self._serial = None
+                if attempt == max_attempts:
+                    raise
+                time.sleep(1)
 
         self._connected = True
         for cmd in _INIT_COMMANDS:

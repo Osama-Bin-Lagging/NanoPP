@@ -371,6 +371,9 @@ class NanoPnPGUI:
         ttk.Button(pb, text="Toggle Enable", command=self._toggle_placement_enable).pack(side=tk.LEFT, padx=2)
         ttk.Button(pb, text="Enable All", command=lambda: self._set_all_placements(True)).pack(side=tk.LEFT, padx=2)
         ttk.Button(pb, text="Disable All", command=lambda: self._set_all_placements(False)).pack(side=tk.LEFT, padx=2)
+        ttk.Separator(pb, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4)
+        ttk.Button(pb, text="Solder Selected", command=self._on_solder_selected).pack(side=tk.LEFT, padx=2)
+        ttk.Button(pb, text="Solder Dry", command=self._on_solder_dry).pack(side=tk.LEFT, padx=2)
 
         # Run controls
         ctrl = ttk.LabelFrame(tab, text="Run")
@@ -952,11 +955,21 @@ class NanoPnPGUI:
                     self._motion.safe_move_to(0, 0)
                     self._result_queue.put(("timing", results))
                     self._result_queue.put(("pos", self._motion.get_position()))
-                elif isinstance(item, tuple) and item[0] == "__RUN_PASTE_FILES__":
+                elif isinstance(item, tuple) and item[0] in ("__RUN_PASTE_FILES__", "__RUN_PASTE_SELECTED__", "__RUN_PASTE_DRY__"):
                     self._polling = False
-                    _, edge_cuts, paste_gbr = item
-                    self._result_queue.put(("job_status", "Dispensing paste..."))
-                    count = self._paste.dispense_paste(edge_cuts, paste_gbr)
+                    if item[0] == "__RUN_PASTE_DRY__":
+                        _, edge_cuts, paste_gbr, refs = item
+                        label = f"Solder dry {', '.join(refs)}..." if refs else "Solder dry run..."
+                        self._result_queue.put(("job_status", label))
+                        count = self._paste.dispense_paste(edge_cuts, paste_gbr, refs=refs, no_dispense=True)
+                    elif item[0] == "__RUN_PASTE_SELECTED__":
+                        _, edge_cuts, paste_gbr, refs = item
+                        self._result_queue.put(("job_status", f"Soldering {', '.join(refs)}..."))
+                        count = self._paste.dispense_paste(edge_cuts, paste_gbr, refs=refs)
+                    else:
+                        _, edge_cuts, paste_gbr = item
+                        self._result_queue.put(("job_status", "Dispensing paste..."))
+                        count = self._paste.dispense_paste(edge_cuts, paste_gbr)
                     self._result_queue.put(("job_status", f"Paste done: {count} components"))
                     self._result_queue.put(("pos", self._motion.get_position()))
                     self._polling = True
@@ -1213,8 +1226,44 @@ class NanoPnPGUI:
         if not self._running:
             return
         self._send_cmd(("__RUN_PASTE_FILES__",
-                        str(self._job_inputs.edge_cuts),
+                        str(self._job_inputs.edge_cuts or ""),
                         str(self._job_inputs.paste)))
+
+    def _on_solder_selected(self):
+        """Dispense paste only for selected placement(s) in the table."""
+        sel = self._place_tree.selection()
+        if not sel:
+            self._append_console("Select placement(s) first", "err")
+            return
+        if not self._job_inputs.can_paste:
+            self._append_console("Load F_Paste file first", "err")
+            return
+        if not self._running:
+            self._append_console("Connect to machine first", "err")
+            return
+        refs = []
+        for item in sel:
+            vals = self._place_tree.item(item, "values")
+            refs.append(str(vals[0]).strip())
+        self._send_cmd(("__RUN_PASTE_SELECTED__",
+                        str(self._job_inputs.edge_cuts or ""),
+                        str(self._job_inputs.paste),
+                        refs))
+
+    def _on_solder_dry(self):
+        """Run solder path without dispensing — movement only."""
+        if not self._job_inputs.can_paste:
+            self._append_console("Load F_Paste file first", "err")
+            return
+        if not self._running:
+            self._append_console("Connect to machine first", "err")
+            return
+        sel = self._place_tree.selection()
+        refs = [str(self._place_tree.item(item, "values")[0]).strip() for item in sel] if sel else None
+        self._send_cmd(("__RUN_PASTE_DRY__",
+                        str(self._job_inputs.edge_cuts or ""),
+                        str(self._job_inputs.paste),
+                        refs))
 
     def _on_run_place(self):
         if not self._job_inputs.can_place:
@@ -1636,11 +1685,12 @@ class NanoPnPGUI:
         }
         self._pos_source = pos_path
 
+        # Always use simple raw + origin (no auto-detect transform).
+        # Passing Edge_Cuts/F_Paste triggers a different coordinate path
+        # that produces wrong values and overwrites the .pos on save.
         placements = load_placements_from_pos(
             pos_path,
             origin_xy=(self._config.board.origin.x, self._config.board.origin.y),
-            edge_cuts_path=self._job_inputs.edge_cuts,
-            paste_path=self._job_inputs.paste,
             package_map=self._config.board.package_map,
             skip_refs_prefixes=self._config.board.skip_refs_prefixes,
         )
@@ -1655,16 +1705,21 @@ class NanoPnPGUI:
     # ── Feeders ───────────────────────────────────────────────
 
     def _populate_feeders(self):
+        prev_sel = self._feed_tree.selection()
         for item in self._feed_tree.get_children():
             self._feed_tree.delete(item)
         for slot, f in self._config.feeders.items():
             remain = max(0, f.max_count - f.feed_count) if f.max_count > 0 else "--"
-            self._feed_tree.insert("", tk.END, values=(
+            self._feed_tree.insert("", tk.END, iid=slot, values=(
                 slot, f.part_id, f"({f.ref_hole.x:.1f},{f.ref_hole.y:.1f},{f.ref_hole.z:.0f})",
                 f"{f.pitch:.0f}", f.feed_count, remain, "Yes" if f.enabled else "No"),
                 tags=("en" if f.enabled else "dis",))
         self._feed_tree.tag_configure("en", foreground=FG)
         self._feed_tree.tag_configure("dis", foreground=FG_DIM)
+        # Restore selection
+        for s in prev_sel:
+            if self._feed_tree.exists(s):
+                self._feed_tree.selection_set(s)
 
     def _update_feeder_table(self, status_list):
         for item in self._feed_tree.get_children():
@@ -1679,7 +1734,7 @@ class NanoPnPGUI:
         sel = self._feed_tree.selection()
         if not sel:
             return
-        slot = self._feed_tree.item(sel[0], "values")[0]
+        slot = str(sel[0])
         f = self._config.feeders.get(slot)
         if not f:
             return
@@ -1741,23 +1796,36 @@ class NanoPnPGUI:
         sel = self._feed_tree.selection()
         if not sel:
             return
-        vals = self._feed_tree.item(sel[0], "values")
-        pos = vals[2].strip("()").split(",")
-        self._send_cmd(("__GOTO__", float(pos[0]), float(pos[1]), None))
+        slot = str(sel[0])
+        f = self._config.feeders.get(slot)
+        if not f:
+            return
+        self._send_cmd(("__GOTO__", f.ref_hole.x, f.ref_hole.y, None))
 
     def _reset_feed_count(self):
         sel = self._feed_tree.selection()
         if not sel:
+            # No feeder selected — reset ALL feeders
+            for feeder in self._config.feeders.values():
+                feeder.feed_count = 0
+            if self._feeders:
+                for feeder in self._config.feeders.values():
+                    self._feeders.reset(feeder)
+            self._populate_feeders()
+            self._auto_save()
+            self._append_console("Reset feed count for all feeders", "cmd")
             return
-        slot = self._feed_tree.item(sel[0], "values")[0]
+        slot = str(sel[0])
         feeder = self._config.feeders.get(slot)
         if feeder:
             feeder.feed_count = 0
             if self._feeders:
                 self._feeders.reset(feeder)
+            self._append_console(f"Reset feed count for {slot}", "cmd")
+        else:
+            self._append_console(f"Feeder '{slot}' not found in config", "err")
         self._populate_feeders()
         self._auto_save()
-        self._append_console(f"Reset feed count for {slot}", "cmd")
 
     # ── Save Config ───────────────────────────────────────────
 

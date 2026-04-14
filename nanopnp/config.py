@@ -124,9 +124,12 @@ class PasteConfig:
     e_prime: float          # paste prime push before first row
     e_rate: float           # E units per row
     e_retract: float        # E retract after each row
+    tool_offset_x: float = 0.0  # T1 nozzle offset from T0 in X
+    tool_offset_y: float = 0.0  # T1 nozzle offset from T0 in Y
 
     @classmethod
     def from_dict(cls, d: dict) -> PasteConfig:
+        off = d.get("tool_offset", {})
         return cls(
             feed_xy=d.get("feed_xy", d.get("travel_feedrate", 2000)),
             feed_xy_slow=d.get("feed_xy_slow", d.get("dispense_feedrate", 2000)),
@@ -137,6 +140,8 @@ class PasteConfig:
             e_prime=d.get("e_prime", 1000),
             e_rate=d.get("e_rate", d.get("extrude_per_mm", 400)),
             e_retract=d.get("e_retract", 50),
+            tool_offset_x=off.get("x", 0.0),
+            tool_offset_y=off.get("y", 0.0),
         )
 
 
@@ -471,6 +476,10 @@ def save_config(config: NanoPnPConfig, path: str | Path = "config.json") -> None
             "e_prime": config.paste_dispensing.e_prime,
             "e_rate": config.paste_dispensing.e_rate,
             "e_retract": config.paste_dispensing.e_retract,
+            "tool_offset": {
+                "x": config.paste_dispensing.tool_offset_x,
+                "y": config.paste_dispensing.tool_offset_y,
+            },
         },
         "board": {
             "origin": {"x": config.board.origin.x, "y": config.board.origin.y},
