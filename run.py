@@ -205,6 +205,10 @@ def cmd_job(config, dry_run: bool, edge_cuts: Path, paste_file: Path, pos: Path,
         print("No placements parsed from .pos file")
         return
 
+    # Store loaded placements into config so the paste dispenser can see them
+    config.placements.clear()
+    config.placements.extend(placements)
+
     vision = _make_vision(config, enable_vision)
     motion = _make_motion(config, dry_run, gcode_file=output)
     try:
