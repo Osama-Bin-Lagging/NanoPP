@@ -24,7 +24,7 @@
     "retract": 30.0
   },
   "camera": {
-    "device_index": 1,
+    "device_index": 0,
     "position": {
       "x": 16.1,
       "y": 46.6
@@ -52,14 +52,14 @@
     "e_rate": 400,
     "e_retract": 50,
     "tool_offset": {
-      "x": -58.6,
-      "y": -11.2
+      "x": -60.05,
+      "y": -12.5
     }
   },
   "board": {
     "origin": {
-      "x": 59.3,
-      "y": 17.0
+      "x": 0.0,
+      "y": 0.0
     },
     "first_pad_offset": {
       "x": 7.0,
@@ -355,18 +355,18 @@
       "part_id": "IC_SOIC8",
       "enabled": true,
       "ref_hole": {
-        "x": 11.4,
-        "y": 89.0,
+        "x": 11.2,
+        "y": 93.5,
         "z": 65.0
       },
       "last_hole": {
-        "x": 11.9,
-        "y": 97.4,
+        "x": 14.7,
+        "y": 103.8,
         "z": 60.0
       },
       "tape_width": 12.0,
       "rotation": 0.0,
-      "feed_count": 1,
+      "feed_count": 0,
       "max_count": 5000
     },
     "F2": {
@@ -374,18 +374,18 @@
       "part_id": "IC_LQFN16",
       "enabled": true,
       "ref_hole": {
-        "x": 25.2,
-        "y": 90.0,
+        "x": 24.4,
+        "y": 95.8,
         "z": 65.0
       },
       "last_hole": {
-        "x": 25.2,
-        "y": 90.5,
+        "x": 24.4,
+        "y": 94.8,
         "z": 60.0
       },
       "tape_width": 8.0,
       "rotation": 0.0,
-      "feed_count": 1,
+      "feed_count": 0,
       "max_count": 5000
     },
     "F3": {
@@ -393,18 +393,18 @@
       "part_id": "IC_SOT236",
       "enabled": true,
       "ref_hole": {
-        "x": 2.6,
-        "y": 91.5,
+        "x": 1.7,
+        "y": 90.8,
         "z": 65.0
       },
       "last_hole": {
-        "x": 2.9,
-        "y": 95.5,
+        "x": 2.5,
+        "y": 93.8,
         "z": 60.0
       },
       "tape_width": 8.0,
-      "rotation": -90.0,
-      "feed_count": 1,
+      "rotation": 0.0,
+      "feed_count": 0,
       "max_count": 5000
     }
   },
@@ -412,74 +412,26 @@
     {
       "ref": "QFN_1",
       "part_id": "IC_LQFN16",
-      "x": 67.8617,
-      "y": 78.5006,
+      "x": 79.1,
+      "y": 67.5,
       "rotation": 45.0,
-      "enabled": false
+      "enabled": true
     },
     {
       "ref": "SOP8_1",
       "part_id": "IC_SOIC8",
-      "x": 55.5617,
-      "y": 41.6006,
+      "x": 68.7,
+      "y": 30.5,
       "rotation": 0.0,
-      "enabled": false
-    },
-    {
-      "ref": "SOP8_3",
-      "part_id": "IC_SOIC8",
-      "x": 73.4617,
-      "y": 41.2006,
-      "rotation": 0.0,
-      "enabled": false
-    },
-    {
-      "ref": "SOP8_5",
-      "part_id": "IC_SOIC8",
-      "x": 92.0617,
-      "y": 42.5006,
-      "rotation": 0.0,
-      "enabled": false
-    },
-    {
-      "ref": "SOP8_7",
-      "part_id": "IC_SOIC8",
-      "x": 111.0617,
-      "y": 43.5006,
-      "rotation": 0.0,
-      "enabled": false
+      "enabled": true
     },
     {
       "ref": "SOT6_1",
       "part_id": "IC_SOT236",
-      "x": 56.2617,
-      "y": 62.1006,
+      "x": 68.8,
+      "y": 49.2,
       "rotation": 0.0,
-      "enabled": false
-    },
-    {
-      "ref": "SOT6_2",
-      "part_id": "IC_SOT236",
-      "x": 73.2617,
-      "y": 58.7006,
-      "rotation": 0.0,
-      "enabled": false
-    },
-    {
-      "ref": "SOT6_3",
-      "part_id": "IC_SOT236",
-      "x": 110.9617,
-      "y": 61.5006,
-      "rotation": 0.0,
-      "enabled": false
-    },
-    {
-      "ref": "SOT6_4",
-      "part_id": "IC_SOT236",
-      "x": 182.4617,
-      "y": 60.1006,
-      "rotation": 0.0,
-      "enabled": false
+      "enabled": true
     }
   ]
 }
